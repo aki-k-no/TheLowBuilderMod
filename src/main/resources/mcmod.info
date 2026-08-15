@@ -1,0 +1,16 @@
+[
+  {
+    "modid": "buildermod",
+    "name": "BuilderMod",
+    "description": "Client-side foundation for AI-assisted building through an embedded MCP service.",
+    "version": "${version}",
+    "mcversion": "${mcversion}",
+    "url": "",
+    "authorList": ["BuilderMod contributors"],
+    "credits": "",
+    "logoFile": "",
+    "screenshots": [],
+    "dependencies": []
+  }
+]
+
