@@ -7,6 +7,12 @@ import dev.buildermod.mcp.CompactIntArray;
 import dev.buildermod.mcp.McpToolExecutor;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
+import java.io.ByteArrayInputStream;
+import java.io.DataInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.util.zip.GZIPInputStream;
+import net.minecraft.nbt.CompressedStreamTools;
 import java.math.BigDecimal;
 import java.nio.IntBuffer;
 import java.util.Base64;
@@ -32,6 +38,8 @@ import net.minecraft.nbt.NBTTagCompound;
 import net.minecraft.util.BlockPos;
 import net.minecraft.util.MovingObjectPosition;
 import net.minecraft.world.biome.BiomeGenBase;
+import net.minecraft.world.WorldServer;
+import net.minecraft.server.integrated.IntegratedServer;
 import org.lwjgl.BufferUtils;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL12;
@@ -58,6 +66,8 @@ public final class MinecraftToolExecutor implements McpToolExecutor {
 
     @Override
     public JsonObject call(final String name, final JsonObject arguments) throws Exception {
+        if ("local_paste_schematic".equals(name)) return localPasteSchematic(arguments);
+        if ("local_fill_blocks".equals(name)) return localFillBlocks(arguments);
         return onClientThread(new Callable<JsonObject>() {
             @Override
             public JsonObject call() throws Exception {
@@ -85,6 +95,7 @@ public final class MinecraftToolExecutor implements McpToolExecutor {
         data.addProperty("z", mc.thePlayer.posZ);
         data.addProperty("yaw", mc.thePlayer.rotationYaw);
         data.addProperty("pitch", mc.thePlayer.rotationPitch);
+        data.addProperty("singleplayer", mc.isSingleplayer() && mc.getIntegratedServer() != null);
         data.addProperty("dimension_id", mc.thePlayer.dimension);
         data.addProperty("dimension_name", mc.theWorld.provider.getDimensionName());
         data.addProperty("game_mode", mc.playerController.getCurrentGameType().getName());
@@ -229,6 +240,142 @@ public final class MinecraftToolExecutor implements McpToolExecutor {
         for (Map.Entry<String, Integer> entry : counts.entrySet()) countJson.addProperty(entry.getKey(), entry.getValue());
         data.add("counts", countJson);
         return result(data, "Summarized " + bounds.volume + " blocks across " + counts.size() + " states.");
+    }
+
+    private JsonObject localPasteSchematic(final JsonObject arguments) throws Exception {
+        final String path = requiredString(arguments, "path");
+        final int originX = requiredInt(arguments, "x"), originY = requiredInt(arguments, "y"), originZ = requiredInt(arguments, "z");
+        final boolean includeAir = optionalBoolean(arguments, "include_air", false);
+        final IntegratedServer[] server = new IntegratedServer[1];
+        final int[] dimension = new int[1];
+        final File[] root = new File[1];
+        onClientThread(new Callable<JsonObject>() {
+            @Override public JsonObject call() throws Exception {
+                Minecraft mc = requireWorld();
+                if (!mc.isSingleplayer() || mc.getIntegratedServer() == null)
+                    throw new ToolFailure("local_paste_schematic requires a local singleplayer world");
+                server[0] = mc.getIntegratedServer(); dimension[0] = mc.thePlayer.dimension;
+                root[0] = new File(mc.mcDataDir, "schematics").getCanonicalFile();
+                return new JsonObject();
+            }
+        });
+        File file = new File(root[0], path).getCanonicalFile();
+        if (new File(path).isAbsolute() || !file.toPath().startsWith(root[0].toPath()) || !file.getName().toLowerCase(java.util.Locale.ROOT).endsWith(".schematic"))
+            throw new ToolFailure("path must be a .schematic file within the Minecraft schematics directory");
+        if (!file.isFile() || file.length() > 4 * 1024 * 1024) throw new ToolFailure("Schematic missing or exceeds 4 MiB");
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (GZIPInputStream input = new GZIPInputStream(new FileInputStream(file))) {
+            byte[] buffer = new byte[8192]; int n;
+            while ((n = input.read(buffer)) != -1) {
+                if (bytes.size() + n > 8 * 1024 * 1024) throw new ToolFailure("Uncompressed schematic exceeds 8 MiB");
+                bytes.write(buffer, 0, n);
+            }
+        }
+        NBTTagCompound tag = CompressedStreamTools.read(new DataInputStream(new ByteArrayInputStream(bytes.toByteArray())));
+        if (!"Alpha".equals(tag.getString("Materials"))) throw new ToolFailure("Only classic Alpha .schematic files are supported");
+        final int width = tag.getShort("Width"), height = tag.getShort("Height"), length = tag.getShort("Length");
+        long volume = (long) width * height * length;
+        if (width <= 0 || height <= 0 || length <= 0 || volume > 65536) throw new ToolFailure("Schematic dimensions must be positive and contain at most 65536 blocks");
+        if (originY < 0 || (long) originY + height > 256 || originX < -30000000 || (long) originX + width > 30000000 || originZ < -30000000 || (long) originZ + length > 30000000)
+            throw new ToolFailure("Schematic extends outside world coordinates");
+        if (tag.getTagList("TileEntities", 10).tagCount() != 0 || tag.getTagList("Entities", 10).tagCount() != 0)
+            throw new ToolFailure("Schematics containing entities or tile entities are not supported");
+        final byte[] blocks = tag.getByteArray("Blocks"), metadata = tag.getByteArray("Data"), add = tag.getByteArray("AddBlocks");
+        if (blocks.length != volume || metadata.length != volume || (add.length != 0 && add.length != (volume + 1) / 2))
+            throw new ToolFailure("Invalid schematic block arrays");
+        final IBlockState[] states = new IBlockState[(int) volume];
+        for (int i = 0; i < states.length; i++) {
+            int id = blocks[i] & 255;
+            if (add.length != 0) id |= ((add[i / 2] >> ((i & 1) * 4)) & 15) << 8;
+            Block block = Block.getBlockById(id);
+            if (block == null || Block.getIdFromBlock(block) != id) throw new ToolFailure("Unknown schematic block ID " + id);
+            int meta = metadata[i] & 255;
+            if (meta > 15) throw new ToolFailure("Invalid schematic block metadata at index " + i);
+            try { states[i] = block.getStateFromMeta(meta); }
+            catch (RuntimeException e) { throw new ToolFailure("Invalid schematic block state at index " + i); }
+            if (block.hasTileEntity(states[i])) throw new ToolFailure("Schematic tile entity blocks are not supported");
+        }
+        final com.google.common.util.concurrent.SettableFuture<JsonObject> completion = com.google.common.util.concurrent.SettableFuture.create();
+        server[0].addScheduledTask(new Runnable() {
+            @Override public void run() {
+                try {
+                    WorldServer world = server[0].worldServerForDimension(dimension[0]);
+                    if (world == null) throw new ToolFailure("Singleplayer world is no longer available");
+                    int maxX = originX + width - 1, maxZ = originZ + length - 1;
+                    for (int z = originZ >> 4; z <= maxZ >> 4; z++) for (int x = originX >> 4; x <= maxX >> 4; x++)
+                        if (!world.isBlockLoaded(new BlockPos((x << 4) + 8, 64, (z << 4) + 8), false)) throw new ToolFailure("Required server chunk is not loaded: " + x + "," + z);
+                    if (!world.getWorldBorder().contains(new BlockPos(originX, originY, originZ)) || !world.getWorldBorder().contains(new BlockPos(maxX, originY + height - 1, maxZ))) throw new ToolFailure("Schematic extends outside the world border");
+                    int changed = 0;
+                    for (int y = 0; y < height; y++) for (int z = 0; z < length; z++) for (int x = 0; x < width; x++) {
+                        IBlockState state = states[(y * length + z) * width + x];
+                        if (!includeAir && state.getBlock() == net.minecraft.init.Blocks.air) continue;
+                        if (world.setBlockState(new BlockPos(originX + x, originY + y, originZ + z), state, 3)) changed++;
+                    }
+                    JsonObject data = new JsonObject(); data.addProperty("changed_blocks", changed); data.addProperty("width", width); data.addProperty("height", height); data.addProperty("length", length);
+                    completion.set(result(data, "Pasted schematic into the local world: " + changed + " blocks changed."));
+                } catch (Throwable error) { completion.setException(error); }
+            }
+        });
+        return completion.get();
+    }
+
+    private JsonObject localFillBlocks(final JsonObject arguments) throws Exception {
+        final Bounds area = bounds(arguments, 65536);
+        if (area.minX < -30000000 || area.maxX >= 30000000 || area.minZ < -30000000 || area.maxZ >= 30000000)
+            throw new ToolFailure("Region is outside Minecraft world coordinates");
+        final int blockId = requiredInt(arguments, "block_id");
+        final int metadata = optionalInt(arguments, "data", 0);
+        checkData(metadata);
+        final String mode = optionalString(arguments, "mode", "replace");
+        requireOneOf(mode, "mode", "replace", "keep", "outline", "hollow");
+        final Block block = Block.getBlockById(blockId);
+        if (block == null || Block.getIdFromBlock(block) != blockId) throw new ToolFailure("Unknown block_id: " + blockId);
+        final IBlockState state;
+        try { state = block.getStateFromMeta(metadata); }
+        catch (RuntimeException e) { throw new ToolFailure("Invalid block metadata: " + metadata); }
+        final IntegratedServer[] server = new IntegratedServer[1];
+        final int[] dimension = new int[1];
+        onClientThread(new Callable<JsonObject>() {
+            @Override public JsonObject call() throws Exception {
+                Minecraft mc = requireWorld();
+                if (!mc.isSingleplayer() || mc.getIntegratedServer() == null)
+                    throw new ToolFailure("local_fill_blocks requires a local singleplayer world");
+                server[0] = mc.getIntegratedServer();
+                dimension[0] = mc.thePlayer.dimension;
+                return new JsonObject();
+            }
+        });
+        final com.google.common.util.concurrent.SettableFuture<JsonObject> completion = com.google.common.util.concurrent.SettableFuture.create();
+        server[0].addScheduledTask(new Runnable() {
+            @Override public void run() {
+              try {
+                WorldServer world = server[0].worldServerForDimension(dimension[0]);
+                if (world == null) throw new ToolFailure("Singleplayer world is no longer available");
+                for (int z = area.minZ >> 4; z <= area.maxZ >> 4; z++)
+                    for (int x = area.minX >> 4; x <= area.maxX >> 4; x++)
+                        if (!world.isBlockLoaded(new BlockPos((x << 4) + 8, 64, (z << 4) + 8), false))
+                            throw new ToolFailure("Required server chunk is not loaded: " + x + "," + z);
+                if (!world.getWorldBorder().contains(new BlockPos(area.minX, area.minY, area.minZ)) ||
+                    !world.getWorldBorder().contains(new BlockPos(area.maxX, area.maxY, area.maxZ)))
+                    throw new ToolFailure("Region extends outside the world border");
+                int changed = 0;
+                for (int y = area.minY; y <= area.maxY; y++)
+                    for (int z = area.minZ; z <= area.maxZ; z++)
+                        for (int x = area.minX; x <= area.maxX; x++) {
+                            BlockPos pos = new BlockPos(x, y, z);
+                            boolean edge = x == area.minX || x == area.maxX || y == area.minY || y == area.maxY || z == area.minZ || z == area.maxZ;
+                            if ("outline".equals(mode) && !edge) continue;
+                            if ("keep".equals(mode) && !world.isAirBlock(pos)) continue;
+                            IBlockState target = "hollow".equals(mode) && !edge ? net.minecraft.init.Blocks.air.getDefaultState() : state;
+                            if (world.setBlockState(pos, target, 3)) changed++;
+                        }
+                JsonObject data = boundsJson(area);
+                data.addProperty("changed_blocks", changed);
+                completion.set(result(data, "Updated " + changed + " blocks in the local world."));
+              } catch (Throwable error) { completion.setException(error); }
+            }
+        });
+        return completion.get();
     }
 
     private JsonObject setBlock(JsonObject arguments) throws ToolFailure {
@@ -702,6 +849,8 @@ public final class MinecraftToolExecutor implements McpToolExecutor {
         long sizeX = (long) maxX - minX + 1L;
         long sizeY = (long) maxY - minY + 1L;
         long sizeZ = (long) maxZ - minZ + 1L;
+        if (sizeX > maxVolume || sizeY > maxVolume || sizeZ > maxVolume || sizeX * sizeY > maxVolume || sizeX * sizeY * sizeZ > maxVolume)
+            throw new ToolFailure("requested volume exceeds limit " + maxVolume);
         long volume = sizeX * sizeY * sizeZ;
         if (volume > maxVolume) throw new ToolFailure("requested volume " + volume + " exceeds limit " + maxVolume);
         return new Bounds(minX, minY, minZ, maxX, maxY, maxZ, (int) volume);

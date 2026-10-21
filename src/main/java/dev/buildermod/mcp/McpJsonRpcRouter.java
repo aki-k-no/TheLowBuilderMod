@@ -186,8 +186,40 @@ final class McpJsonRpcRouter {
                 rangedProperty("width", "integer", "Image width; default 320", 64, 512),
                 rangedProperty("height", "integer", "Image height; default 180", 64, 512),
                 rangedProperty("fov", "number", "Field of view; default 70", 30, 110)), true));
+        tools.add(writeTool("local_paste_schematic",
+            "Singleplayer only: paste a classic Minecraft 1.8.9 Alpha .schematic from the Minecraft schematics directory into the integrated server. Origin is the minimum corner; internal WorldEdit offsets are ignored. Maximum 65536 blocks; loaded chunks required. Entities and tile entities are rejected. Air is skipped by default. No undo.",
+            schema(new String[] {"path", "x", "y", "z"},
+                property("path", "string", "Relative .schematic path under the Minecraft schematics directory"),
+                property("x", "integer", "Destination minimum X"), rangedProperty("y", "integer", "Destination minimum Y", 0, 255),
+                property("z", "integer", "Destination minimum Z"), property("include_air", "boolean", "Paste air too; default false"))));
+        tools.add(writeTool("local_fill_blocks",
+            "For local singleplayer worlds only: directly update up to 65536 blocks in the integrated server, without commands or FAWE. Prefer this for cuboids in singleplayer. Changes are saved and synchronized; requires loaded server chunks. No undo. Modes: replace, keep, outline, hollow.",
+            schema(new String[] {"min_x", "min_y", "min_z", "max_x", "max_y", "max_z", "block_id"},
+                property("min_x", "integer", "Minimum world X"), rangedProperty("min_y", "integer", "Minimum world Y", 0, 255),
+                property("min_z", "integer", "Minimum world Z"), property("max_x", "integer", "Maximum world X"),
+                rangedProperty("max_y", "integer", "Maximum world Y", 0, 255), property("max_z", "integer", "Maximum world Z"),
+                rangedProperty("block_id", "integer", "Numeric legacy block ID", 0, 4095),
+                rangedProperty("data", "integer", "Legacy block metadata; default 0", 0, 15),
+                enumProperty("mode", "Fill mode; default replace", "replace", "keep", "outline", "hollow"))));
+        tools.add(writeTool("fawe_region_edit",
+            "PREFERRED building tool for one cuboid operation. Efficiently select an inclusive cuboid with FAWE //pos1 and //pos2, then run one bounded //set, //replace, //walls, //faces, or //overlay operation. Prefer this over fill_blocks or sequence_set_blocks for ordinary regions. Maximum volume 2000000 blocks.",
+            schema(new String[] {"min_x", "min_y", "min_z", "max_x", "max_y", "max_z", "operation", "pattern"},
+                property("min_x", "integer", "Minimum world X"),
+                rangedProperty("min_y", "integer", "Minimum world Y", 0, 255),
+                property("min_z", "integer", "Minimum world Z"),
+                property("max_x", "integer", "Maximum world X"),
+                rangedProperty("max_y", "integer", "Maximum world Y", 0, 255),
+                property("max_z", "integer", "Maximum world Z"),
+                enumProperty("operation", "FAWE region operation", "set", "replace", "walls", "faces", "overlay"),
+                property("pattern", "string", "Minecraft 1.8.9 numeric FAWE pattern, e.g. 1, 1:1, 70%1,30%4, or #checker[1,4]"),
+                property("source_pattern", "string", "Numeric legacy FAWE source mask/pattern; required only for replace"))));
+        tools.add(writeTool("fawe_workflow",
+            "PREFERRED building tool for shapes, masks, patterns, terrain, clipboard operations, transforms, and coordinated edits. Run 1-6 validated FAWE steps in order; call this tool multiple times for longer builds. Global masks/transforms are cleared afterward by default. Prefer this over sequence_set_blocks whenever FAWE can express the build.",
+            schema(new String[] {"steps"},
+                faweStepsProperty(),
+                property("clear_global_state", "boolean", "Clear any gmask, gsmask, and gtransform used by this workflow afterward; default true"))));
         tools.add(writeTool("set_block",
-            "Send one Minecraft 1.8.9 /setblock command. Use a numeric legacy block ID by default because this server may reject names as invalid_block.",
+            "Send one Minecraft 1.8.9 /setblock command. Use only for a small exact correction when FAWE would be excessive. Use a numeric legacy block ID by default because this server may reject names as invalid_block.",
             schema(new String[] {"x", "y", "z", "block"},
                 property("x", "integer", "World X"),
                 rangedProperty("y", "integer", "World Y", 0, 255),
@@ -196,7 +228,7 @@ final class McpJsonRpcRouter {
                 rangedProperty("data", "integer", "Legacy block data; default 0", 0, 15),
                 enumProperty("mode", "Placement mode; default replace", "replace", "destroy", "keep"))));
         tools.add(writeTool("fill_blocks",
-            "Send one Minecraft 1.8.9 /fill command for at most 32768 blocks. Use numeric legacy block IDs by default. Optional filter applies only in replace mode.",
+            "Send one Minecraft 1.8.9 /fill command for at most 32768 blocks. Prefer fawe_region_edit for ordinary building regions; use this only when exact vanilla fill semantics are useful or FAWE is unsuitable. Use numeric legacy block IDs by default. Optional filter applies only in replace mode.",
             schema(new String[] {"min_x", "min_y", "min_z", "max_x", "max_y", "max_z", "block"},
                 property("min_x", "integer", "Minimum world X"),
                 rangedProperty("min_y", "integer", "Minimum world Y", 0, 255),
@@ -210,29 +242,12 @@ final class McpJsonRpcRouter {
                 property("filter_block", "string", "Numeric legacy ID of the block to replace; replace mode only"),
                 rangedProperty("filter_data", "integer", "Optional legacy data filter", 0, 15))));
         tools.add(writeTool("sequence_set_blocks",
-            "Send TheLow /sequence_setblock using numeric blockId[:data] and ordered coordinates. Minecraft 1.8.9 commands are limited to 100 characters.",
+            "LAST RESORT, not a general building tool. Send TheLow /sequence_setblock only for explicitly requested timed ordered placement, or a small sparse irregular coordinate list that FAWE cannot reasonably express. Never use it for walls, floors, regions, outlines, repeated shapes, or large builds; prefer fawe_region_edit/fawe_workflow. Uses numeric blockId[:data], and Minecraft 1.8.9 commands are limited to 100 characters.",
             schema(new String[] {"interval_seconds", "block_id", "positions"},
                 rangedProperty("interval_seconds", "number", "Seconds between placements", 0, 3600),
                 rangedProperty("block_id", "integer", "Numeric legacy block ID", 0, 4095),
                 rangedProperty("data", "integer", "Legacy block data; default 0", 0, 15),
                 positionsProperty())));
-        tools.add(writeTool("fawe_region_edit",
-            "Select an inclusive cuboid with FAWE //pos1 and //pos2, then run one bounded //set, //replace, //walls, //faces, or //overlay operation. Maximum volume 2000000 blocks.",
-            schema(new String[] {"min_x", "min_y", "min_z", "max_x", "max_y", "max_z", "operation", "pattern"},
-                property("min_x", "integer", "Minimum world X"),
-                rangedProperty("min_y", "integer", "Minimum world Y", 0, 255),
-                property("min_z", "integer", "Minimum world Z"),
-                property("max_x", "integer", "Maximum world X"),
-                rangedProperty("max_y", "integer", "Maximum world Y", 0, 255),
-                property("max_z", "integer", "Maximum world Z"),
-                enumProperty("operation", "FAWE region operation", "set", "replace", "walls", "faces", "overlay"),
-                property("pattern", "string", "Minecraft 1.8.9 numeric FAWE pattern, e.g. 1, 1:1, 70%1,30%4, or #checker[1,4]"),
-                property("source_pattern", "string", "Numeric legacy FAWE source mask/pattern; required only for replace"))));
-        tools.add(writeTool("fawe_workflow",
-            "Run 1-6 validated FAWE steps in order. Combine selections, masks/transforms, region and terrain edits, generated shapes, clipboard transforms/pastes, movement, biomes, and history. Global masks/transforms are cleared afterward by default.",
-            schema(new String[] {"steps"},
-                faweStepsProperty(),
-                property("clear_global_state", "boolean", "Clear any gmask, gsmask, and gtransform used by this workflow afterward; default true"))));
         return tools;
     }
 
@@ -404,6 +419,8 @@ final class McpJsonRpcRouter {
             || "inspect_position".equals(name)
             || "summarize_blocks".equals(name)
             || "capture_view".equals(name)
+            || "local_paste_schematic".equals(name)
+            || "local_fill_blocks".equals(name)
             || "set_block".equals(name)
             || "fill_blocks".equals(name)
             || "sequence_set_blocks".equals(name)
@@ -414,9 +431,12 @@ final class McpJsonRpcRouter {
     private String instructions() {
         return "This is Minecraft 1.8.9. For every placed, replaced, masked, or generated block, use numeric legacy block IDs by default; do not use modern or namespaced block names unless the player explicitly confirms support. "
             + "Use ID:data in FAWE patterns (for example 1, 1:1, 35:14, or 70%1,30%4) and use the separate data field in set_block/fill_blocks. Common IDs: air=0, stone=1, grass=2, dirt=3, cobblestone=4, planks=5, log=17, glass=20, wool=35, bricks=45, stonebrick=98, quartz=155, stained_clay=159. "
-            + "Observe the loaded Minecraft client world, then build through structured command tools. Call get_player_context when coordinates are unknown. "
+            + "Observe the loaded Minecraft client world, then build using the available tools. For substantial new builds, use the player's reference or generate a Minecraft-style 3D concept image if an image generation tool is available; if not, be honest and proceed with an internal design. Translate the target into a block-scale design, build, capture_view from a comparable viewpoint, compare silhouette, proportions, palette and details, and correct meaningful differences at milestones. Simple isolated edits do not need a concept image. Call get_player_context when coordinates are unknown. "
             + "For low token use: summarize_blocks first, then get_blocks only on needed subregions; omit height-map top blocks unless needed; "
-            + "use sample_step for broad surveys and capture_view last. Prefer fawe_region_edit for one large cuboid edit and fawe_workflow for coordinated masks, shapes, and multiple FAWE steps. "
+            + "use sample_step for broad surveys and capture_view last. In singleplayer, for complex custom builds you may create a classic Alpha .schematic file in the Minecraft schematics directory and paste it with local_paste_schematic. For cuboids prefer local_fill_blocks; it directly updates the local world. In multiplayer FAWE is the default for building because it minimizes tool calls, commands, tokens, and time: prefer fawe_region_edit for cuboids and fawe_workflow for shapes, masks, patterns, terrain, clipboard operations, and coordinated steps; make multiple FAWE calls when needed. "
+            + "Use set_block/fill_blocks only for small exact corrections or special vanilla semantics. sequence_set_blocks is a last resort only for explicitly requested timed placement or small sparse irregular coordinates that FAWE cannot express; never use it for ordinary walls, floors, regions, outlines, repeated shapes, or large builds. "
+            + "Before the first write, classify the request: a single localized correction may execute directly, but a build with multiple components, materials, shapes, stages, or expected tool calls requires a concise internal plan first. Gather only necessary context, then settle footprint/orientation, proportions, palette, components, FAWE operations, execution order, and verification milestones before placing blocks. Execute coarse-to-fine, verify after meaningful stages, and adapt remaining steps from observations; do not spend tokens narrating the internal plan unless asked. "
+            + "When selecting blocks, freely consider non-full blocks such as stairs, slabs, fences, walls, panes, and trapdoors alongside full blocks if they naturally improve the result. This is an optional design possibility, not a structural rule or constraint; use whichever forms best fit the build. Apply Minecraft 1.8.9 numeric legacy IDs and metadata when needed. "
             + "Include explicit pos1/pos2 steps for selection-based edits and leave clear_global_state enabled unless persistence is intentional. All building tools write to the server and may require approval. "
             + "The client reports command transmission, not server success; inspect the world afterward to verify changes.";
     }

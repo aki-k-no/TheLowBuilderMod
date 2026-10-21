@@ -44,7 +44,51 @@ Run `/builder` or `/builder gui` to open the dedicated conversation screen. Its 
 
 The GUI has a persistent `Writes: Ask` / `Writes: Auto` switch. `Writes: Ask` is the default. Because `codex exec` is non-interactive, a blocked BuilderMod write is shown in the conversation and exposes an `Approve once` button; pressing it retries the same request in the same session with approval for that turn only. `Writes: Auto` approves BuilderMod write tools for each GUI/command turn without changing the user's global Codex approval policy.
 
-Only one request runs at a time, and each request times out after three minutes. The supported standalone Codex CLI must already be installed and signed in. BuilderMod checks `BUILDERMOD_CODEX_PATH`, the inherited `PATH`, and the official Windows standalone locations under `%LOCALAPPDATA%\\Programs\\OpenAI\\Codex` and `$CODEX_HOME\\packages\\standalone`. BuilderMod never copies or executes the private CLI binary inside the Windows Codex app package.
+Use the GUI's `Image` button to attach up to four PNG, JPEG, WebP, or GIF files (20 MiB each) to the next message. Press `Ctrl+V` to attach image pixels copied from a browser or screenshot tool, or image files copied in Explorer. If the clipboard only contains text, `Ctrl+V` keeps its normal text-paste behavior. Images work for both a new Codex session and follow-up turns. The selected paths are passed as repeated `codex exec --image` arguments; regular image files are not copied or modified by BuilderMod, while clipboard pixels are saved as temporary PNG files for the game session. The `X` button removes pending attachments.
+
+Only one request runs at a time. Requests have no fixed timeout, so long-running Goal and building work can continue until Codex completes. While a request is running, the GUI's `Send` button changes to `Cancel`; `/builder cancel` provides the same operation from chat. The supported standalone Codex CLI must already be installed and signed in. BuilderMod checks `BUILDERMOD_CODEX_PATH`, the inherited `PATH`, and the official Windows standalone locations under `%LOCALAPPDATA%\\Programs\\OpenAI\\Codex` and `$CODEX_HOME\\packages\\standalone`. BuilderMod never copies or executes the private CLI binary inside the Windows Codex app package.
+
+The GUI shows Codex token usage reported by JSON events: input tokens, cached input tokens, output tokens, and the accumulated session total. Codex CLI normally reports authoritative usage when a turn completes, so the display updates as soon as each usage event arrives rather than estimating tokens locally.
+
+
+## Codex CLI のインストール（Windows）
+
+`/builder ask` と会話 GUI は、Windows にインストールされた **standalone Codex CLI** を起動します。ChatGPT のデスクトップアプリだけでは不足するため、初回のみ PowerShell で次を実行してください。
+
+```powershell
+irm https://chatgpt.com/codex/install.ps1 | iex
+```
+
+インストール後、同じ PowerShell でログインし、ブラウザーで ChatGPT アカウントを認証します。
+
+```powershell
+codex login
+```
+
+次のコマンドで、CLI の版とログイン状態を確認できます。
+
+```powershell
+codex --version
+codex login status
+```
+
+BuilderMod は `BUILDERMOD_CODEX_PATH` が設定されている場合はその実行ファイルを使います。未設定時は `PATH`、続いて標準の Windows インストール先 `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe` を探索します。通常は環境変数の設定は不要です。
+
+### 更新とモデル確認
+
+CLI の更新は次で行えます。
+
+```powershell
+codex update
+```
+
+自己更新に対応していない場合は、上記のインストールコマンドをもう一度実行してください。更新後は、BuilderMod を起動する前に次で、その CLI が実際に利用できるモデルを確認できます。
+
+```powershell
+codex debug models
+```
+
+モデルは ChatGPT アプリと CLI で常に同じとは限りません。アカウント、プラン、CLI の版、段階的な提供状況によって変わります。BuilderMod に現在登録されている候補は `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` です。`debug models` の結果が異なる場合は、Default を選んで CLI 側の既定モデルを使ってください。選択したモデルが未対応だった場合、BuilderMod は Default を指定して同じ依頼を自動的に再試行します。
 
 ## Minecraft MCP observation tools
 
@@ -68,6 +112,12 @@ BuilderMod also exposes structured write tools. They are marked as destructive, 
 - `sequence_set_blocks`: TheLow `/sequence_setblock <seconds> blockId[:data] x y z & ...` using ordered coordinates
 - `fawe_region_edit`: bounded FAWE cuboid edit using `//pos1`, `//pos2`, then `//set`, `//replace`, `//walls`, `//faces`, or `//overlay` (up to 2,000,000 blocks)
 - `fawe_workflow`: up to six validated FAWE steps combining selections, global masks/transforms, region/terrain edits, generated shapes, clipboard copy/cut/paste/rotate/flip, movement, biome edits, and undo/redo. Global state is cleared afterward by default.
+
+Codex is instructed to prefer FAWE for building because it usually needs fewer tool calls, commands, tokens, and less time. `fawe_region_edit` is the default for cuboids and `fawe_workflow` for shapes, masks, patterns, terrain, and coordinated edits. `sequence_set_blocks` is reserved for explicitly requested timed placement or small sparse irregular coordinate lists that FAWE cannot reasonably express.
+
+Larger builds use a planning-first flow. Before the first write, Codex gathers the minimum necessary world context and internally settles the footprint, orientation, proportions, palette, components, FAWE operations, execution order, and verification milestones. It then builds coarse-to-fine and checks the world at meaningful stages. A single localized correction or simple isolated edit skips this planning overhead and executes directly. The internal plan is not narrated unless requested, keeping token use down.
+
+When selecting blocks, Codex is reminded that stairs, slabs, fences, walls, panes, trapdoors, and other non-full blocks are available alongside full blocks. This is deliberately only an optional design possibility: it does not prescribe the structure, decoration style, palette, or where those blocks must be used.
 
 Commands are sent as the logged-in player on Minecraft's client thread. BuilderMod validates every field and rejects generated commands over Minecraft 1.8.9's 100-character chat-packet limit instead of allowing silent truncation. A successful tool result confirms transmission only; use the observation tools afterward to verify that the server accepted and applied the change.
 
@@ -97,7 +147,7 @@ Codexはウィンドウを閉じてもバックグラウンドで動き続けま
 .\gradlew.bat clean build
 ```
 
-成果物は `build/libs/buildermod-0.3.1.jar` に生成されます。
+成果物は `build/libs/buildermod-0.12.7.jar` に生成されます。
 
 ## 設定
 
@@ -113,3 +163,25 @@ Codexはウィンドウを閉じてもバックグラウンドで動き続けま
 ```text
 http://127.0.0.1:25585/mcp
 ```
+
+## Singleplayer bulk building
+
+`local_fill_blocks` directly edits the integrated server world in singleplayer, without FAWE or chat commands. It supports replace, keep, outline, and hollow modes for cuboids up to 65,536 blocks per call. The target chunks must already be loaded. Changes are saved and sent to clients, and cannot be undone through this tool. It is a write tool subject to the usual approval setting; it rejects multiplayer worlds. `get_player_context` reports `singleplayer` so an agent can choose the appropriate tool.
+
+## Singleplayer schematic paste
+
+For custom structures, Codex can create a classic gzip-compressed Alpha `.schematic` under `.minecraft/schematics/` and call `local_paste_schematic` with a path relative to that directory and destination `x`, `y`, `z`. The destination is the minimum corner; WorldEdit origin/offset tags are ignored. The classic arrays use `(y * Length + z) * Width + x` order and legacy numeric block IDs and metadata. Up to 65,536 blocks are supported; target chunks must be loaded. Air is skipped unless `include_air` is true. Entities, tile entities, and blocks requiring tile entities are rejected. There is no undo. This is an approval-controlled write and only works in local singleplayer.
+
+## Visual building workflow
+
+For substantial builds, Codex uses an attached reference or, when an image-generation tool is available in its environment, generates a Minecraft-style 3D concept before building. It translates that visual target into blocks, then uses `capture_view` at meaningful milestones to compare and correct the build. If image generation is unavailable it reports the limitation and proceeds with an internal design. Simple edits skip the concept step.
+
+The Minecraft-launched Codex CLI runs with the `workspace-write` sandbox so it can create and validate schematics under `.minecraft/schematics`. The prompt limits file changes and shell commands to that purpose; the sandbox itself permits writes across its configured workspace, so this scope is an instruction rather than a filesystem-enforced restriction. The existing Writes switch controls BuilderMod MCP writes, not shell or file operations. Image generation depends on tools available to the installed Codex environment.
+
+## In-game concept images
+
+When Codex generates a concept image, it saves a PNG or JPEG under `.minecraft/schematics/concepts/` and finishes its reply with `BUILDERMOD_CONCEPT_IMAGE: relative/path.png`. BuilderMod validates that the referenced file stays in that directory and is an image no larger than 20 MiB. The image appears directly after Codex's reply in the conversation history and scrolls with it; click it to enlarge. The image remains available until the conversation is cleared or Minecraft exits.
+
+## Model and reasoning controls
+
+The BuilderMod conversation screen has `Model` and `Think` buttons. Each click cycles the model between Default, `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` (the models exposed by the bundled Codex CLI catalog); reasoning cycles Default, low, medium, high, xhigh, max, and ultra. The values persist in `buildermod.cfg` and are passed to the next Codex CLI request. Choose Default to retain the Codex CLI's own configured model or reasoning effort.

@@ -33,7 +33,7 @@ public final class BuilderClientCommand extends CommandBase {
 
     @Override
     public String getCommandUsage(ICommandSender sender) {
-        return "/builder [gui|ask <message>|status|codex connect]";
+        return "/builder [gui|ask <message>|cancel|status|codex connect]";
     }
 
     @Override
@@ -66,6 +66,12 @@ public final class BuilderClientCommand extends CommandBase {
         if (args.length == 1 && "status".equalsIgnoreCase(args[0])) {
             sender.addChatMessage(new ChatComponentText("[BuilderMod] " + mcpService.describeStatus()));
             sender.addChatMessage(new ChatComponentText("[BuilderMod] " + codexCliService.describeStatus()));
+            return;
+        }
+        if (args.length == 1 && "cancel".equalsIgnoreCase(args[0])) {
+            sender.addChatMessage(new ChatComponentText(conversation.cancel()
+                ? "[BuilderMod] Cancelling Codex request..."
+                : "[BuilderMod] No Codex request is running."));
             return;
         }
         if (args.length == 2
@@ -126,7 +132,7 @@ public final class BuilderClientCommand extends CommandBase {
     @Override
     public List<String> addTabCompletionOptions(ICommandSender sender, String[] args, net.minecraft.util.BlockPos pos) {
         if (args.length == 1) {
-            return getListOfStringsMatchingLastWord(args, Arrays.asList("gui", "ask", "status", "codex"));
+            return getListOfStringsMatchingLastWord(args, Arrays.asList("gui", "ask", "cancel", "status", "codex"));
         }
         if (args.length == 2 && "codex".equalsIgnoreCase(args[0])) {
             return getListOfStringsMatchingLastWord(args, Arrays.asList("connect"));

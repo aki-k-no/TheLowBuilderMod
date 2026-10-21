@@ -6,6 +6,50 @@ import org.junit.Test;
 
 public final class McpJsonRpcRouterTest {
     @Test
+    public void schematicPasteIsExposedAsDestructiveWriteAndDispatches() {
+        McpJsonRpcRouter router = new McpJsonRpcRouter(new McpToolExecutor() {
+            @Override public JsonObject call(String name, JsonObject arguments) {
+                Assert.assertEquals("local_paste_schematic", name);
+                Assert.assertEquals("house.schematic", arguments.get("path").getAsString());
+                JsonObject result = new JsonObject(); result.addProperty("isError", false); return result;
+            }
+        });
+        JsonObject listed = router.route("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}",
+            McpJsonRpcRouter.LEGACY_PROTOCOL_VERSION, null).getBody().getAsJsonObject("result");
+        boolean found = false;
+        for (com.google.gson.JsonElement entry : listed.getAsJsonArray("tools")) {
+            JsonObject tool = entry.getAsJsonObject();
+            if ("local_paste_schematic".equals(tool.get("name").getAsString())) {
+                found = true;
+                Assert.assertTrue(tool.getAsJsonObject("annotations").get("destructiveHint").getAsBoolean());
+                Assert.assertFalse(tool.getAsJsonObject("annotations").get("readOnlyHint").getAsBoolean());
+            }
+        }
+        Assert.assertTrue(found);
+        JsonObject response = router.route("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"local_paste_schematic\",\"arguments\":{\"path\":\"house.schematic\",\"x\":0,\"y\":64,\"z\":0}}}",
+            McpJsonRpcRouter.LEGACY_PROTOCOL_VERSION, null).getBody().getAsJsonObject("result");
+        Assert.assertFalse(response.get("isError").getAsBoolean());
+    }
+
+    @Test
+    public void initializeRequiresPlanningBeforeLargeBuildWrites() {
+        McpJsonRpcRouter router = new McpJsonRpcRouter();
+        McpJsonRpcRouter.RouteResult response = router.route(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{"
+                + "\"protocolVersion\":\"" + McpJsonRpcRouter.LEGACY_PROTOCOL_VERSION + "\"}}",
+            McpJsonRpcRouter.LEGACY_PROTOCOL_VERSION,
+            null
+        );
+        String instructions = response.getBody().getAsJsonObject("result").get("instructions").getAsString();
+        Assert.assertTrue(instructions.contains("Before the first write, classify the request"));
+        Assert.assertTrue(instructions.contains("requires a concise internal plan first"));
+        Assert.assertTrue(instructions.contains("single localized correction may execute directly"));
+        Assert.assertTrue(instructions.contains("freely consider non-full blocks"));
+        Assert.assertTrue(instructions.contains("optional design possibility, not a structural rule or constraint"));
+        Assert.assertTrue(instructions.contains("whichever forms best fit the build"));
+    }
+
+    @Test
     public void dispatchesKnownToolAndReturnsStructuredContent() {
         McpJsonRpcRouter router = new McpJsonRpcRouter(new McpToolExecutor() {
             @Override
@@ -110,5 +154,31 @@ public final class McpJsonRpcRouterTest {
         Assert.assertTrue("sequence_set_blocks tool was not listed", sequenceFound);
         Assert.assertTrue("fawe_region_edit tool was not listed", faweFound);
         Assert.assertTrue("fawe_workflow tool was not listed", workflowFound);
+    }
+
+    @Test
+    public void listsFaweBeforeSequenceAndMarksSequenceAsLastResort() {
+        McpJsonRpcRouter router = new McpJsonRpcRouter();
+        McpJsonRpcRouter.RouteResult response = router.route(
+            "{\"jsonrpc\":\"2.0\",\"id\":11,\"method\":\"tools/list\",\"params\":{}}",
+            McpJsonRpcRouter.LEGACY_PROTOCOL_VERSION,
+            null
+        );
+        com.google.gson.JsonArray tools = response.getBody().getAsJsonObject("result").getAsJsonArray("tools");
+        int faweRegionIndex = -1;
+        int sequenceIndex = -1;
+        String sequenceDescription = "";
+        for (int i = 0; i < tools.size(); i++) {
+            JsonObject tool = tools.get(i).getAsJsonObject();
+            String name = tool.get("name").getAsString();
+            if ("fawe_region_edit".equals(name)) faweRegionIndex = i;
+            if ("sequence_set_blocks".equals(name)) {
+                sequenceIndex = i;
+                sequenceDescription = tool.get("description").getAsString();
+            }
+        }
+        Assert.assertTrue(faweRegionIndex >= 0 && faweRegionIndex < sequenceIndex);
+        Assert.assertTrue(sequenceDescription.contains("LAST RESORT"));
+        Assert.assertTrue(sequenceDescription.contains("Never use it for walls"));
     }
 }

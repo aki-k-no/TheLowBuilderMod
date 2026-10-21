@@ -13,30 +13,36 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Runs non-interactive Codex CLI turns without blocking Minecraft's client thread. */
 public final class CodexCliService {
-    private static final long TIMEOUT_SECONDS = 180L;
     private static final int MAX_REQUEST_LENGTH = 4000;
     private static final int MAX_DIAGNOSTIC_BYTES = 8192;
     private static final int CHAT_CHUNK_LENGTH = 220;
+    static final int MAX_IMAGES = 4;
+    static final long MAX_IMAGE_BYTES = 20L * 1024L * 1024L;
     private static final String[] BUILDER_WRITE_TOOLS = {
-        "set_block", "fill_blocks", "sequence_set_blocks", "fawe_region_edit", "fawe_workflow"
+        "local_paste_schematic", "local_fill_blocks", "set_block", "fill_blocks", "sequence_set_blocks", "fawe_region_edit", "fawe_workflow"
     };
 
     private final ClientTaskQueue clientTaskQueue;
     private final File workingDirectory;
     private final ExecutorService executor;
     private final AtomicBoolean busy = new AtomicBoolean(false);
+    private final AtomicBoolean cancellationRequested = new AtomicBoolean(false);
     private volatile Process currentProcess;
     private volatile long startedAtMillis;
     private volatile String lastProgress = "No Codex request has run yet.";
+    private TokenUsage lastTurnUsage;
+    private long sessionInputTokens;
+    private long sessionCachedInputTokens;
+    private long sessionOutputTokens;
 
     public CodexCliService(ClientTaskQueue clientTaskQueue, File workingDirectory) {
         this.clientTaskQueue = clientTaskQueue;
@@ -51,16 +57,19 @@ public final class CodexCliService {
         });
     }
 
-    public boolean ask(final String request, final String sessionId, final boolean approveWrites, final Listener listener) {
+    public boolean ask(final String request, final String sessionId, final boolean approveWrites, final String model, final String reasoningEffort,
+                       final List<File> images, final Listener listener) {
         if (request == null || request.trim().isEmpty()) {
             throw new IllegalArgumentException("request must not be empty");
         }
         if (request.length() > MAX_REQUEST_LENGTH) {
             throw new IllegalArgumentException("request is too long (maximum 4000 characters)");
         }
+        final List<File> validatedImages = validateImages(images);
         if (!busy.compareAndSet(false, true)) {
             return false;
         }
+        cancellationRequested.set(false);
         startedAtMillis = System.currentTimeMillis();
         lastProgress = "Starting Codex CLI...";
 
@@ -68,7 +77,7 @@ public final class CodexCliService {
             @Override
             public void run() {
                 try {
-                    final String reply = runCodex(request, sessionId, approveWrites, listener);
+                    final String reply = runCodex(request, sessionId, approveWrites, model, reasoningEffort, validatedImages, listener);
                     lastProgress = "Completed.";
                     dispatch(new Runnable() {
                         @Override
@@ -77,13 +86,23 @@ public final class CodexCliService {
                         }
                     });
                 } catch (final Exception exception) {
-                    lastProgress = "Failed: " + toUserMessage(exception);
-                    dispatch(new Runnable() {
-                        @Override
-                        public void run() {
-                            listener.onError(toUserMessage(exception));
-                        }
-                    });
+                    if (cancellationRequested.get() || exception instanceof RequestCancelledException) {
+                        lastProgress = "Cancelled.";
+                        dispatch(new Runnable() {
+                            @Override
+                            public void run() {
+                                listener.onCancelled();
+                            }
+                        });
+                    } else {
+                        lastProgress = "Failed: " + toUserMessage(exception);
+                        dispatch(new Runnable() {
+                            @Override
+                            public void run() {
+                                listener.onError(toUserMessage(exception));
+                            }
+                        });
+                    }
                 } finally {
                     currentProcess = null;
                     busy.set(false);
@@ -99,13 +118,41 @@ public final class CodexCliService {
 
     public String describeStatus() {
         if (!busy.get()) {
-            return "Codex idle. Last progress: " + lastProgress;
+            return "Codex idle. Last progress: " + lastProgress + ". " + describeTokenUsage();
         }
         long elapsedSeconds = Math.max(0L, (System.currentTimeMillis() - startedAtMillis) / 1000L);
-        return "Codex running for " + elapsedSeconds + "s. Last progress: " + lastProgress;
+        return "Codex running for " + elapsedSeconds + "s. Last progress: " + lastProgress
+            + ". " + describeTokenUsage();
+    }
+
+    public synchronized String describeTokenUsage() {
+        if (lastTurnUsage == null) return "Tokens: waiting for Codex usage data";
+        long sessionTotal = sessionInputTokens + sessionOutputTokens;
+        long turnTotal = lastTurnUsage.inputTokens + lastTurnUsage.outputTokens;
+        return "Tokens turn I:" + lastTurnUsage.inputTokens + " C:" + lastTurnUsage.cachedInputTokens
+            + " O:" + lastTurnUsage.outputTokens + " T:" + turnTotal
+            + " | session I:" + sessionInputTokens + " C:" + sessionCachedInputTokens
+            + " O:" + sessionOutputTokens + " T:" + sessionTotal;
+    }
+
+    public synchronized void resetTokenUsage() {
+        lastTurnUsage = null;
+        sessionInputTokens = 0L;
+        sessionCachedInputTokens = 0L;
+        sessionOutputTokens = 0L;
+    }
+
+    public boolean cancel() {
+        if (!busy.get()) return false;
+        cancellationRequested.set(true);
+        lastProgress = "Cancelling...";
+        Process process = currentProcess;
+        if (process != null) process.destroy();
+        return true;
     }
 
     public void shutdown() {
+        cancellationRequested.set(true);
         Process process = currentProcess;
         if (process != null) {
             process.destroy();
@@ -113,37 +160,41 @@ public final class CodexCliService {
         executor.shutdownNow();
     }
 
-    private String runCodex(String request, String sessionId, boolean approveWrites, Listener listener) throws Exception {
+    private String runCodex(String request, String sessionId, boolean approveWrites, String model, String reasoningEffort,
+                            List<File> images, Listener listener) throws Exception {
         File outputFile = File.createTempFile("buildermod-codex-", ".txt");
         try {
+            if (cancellationRequested.get()) throw new RequestCancelledException();
             String executable = CodexExecutableResolver.resolve();
 
             ProcessBuilder builder = new ProcessBuilder(
-                buildCommand(executable, outputFile, buildPrompt(request), sessionId, approveWrites)
+                buildCommand(executable, outputFile, buildPrompt(request), sessionId, approveWrites, model, reasoningEffort, images)
             );
             builder.directory(workingDirectory);
             builder.redirectErrorStream(true);
             Process process = builder.start();
             currentProcess = process;
+            if (cancellationRequested.get()) {
+                process.destroy();
+                throw new RequestCancelledException();
+            }
             // codex exec accepts follow-up prompts on stdin. Close the pipe so a one-shot
             // Minecraft request exits after its first turn instead of waiting until timeout.
             process.getOutputStream().close();
 
             final ByteArrayOutputStream diagnostics = new ByteArrayOutputStream();
             Thread outputReader = startOutputReader(process.getInputStream(), diagnostics, listener);
-            boolean finished = process.waitFor(TIMEOUT_SECONDS, TimeUnit.SECONDS);
-            if (!finished) {
-                process.destroy();
-                if (!process.waitFor(2, TimeUnit.SECONDS)) {
-                    process.destroyForcibly();
-                }
-                throw new IOException("Codex CLI timed out after " + TIMEOUT_SECONDS + " seconds");
-            }
+            process.waitFor();
             outputReader.join(2000L);
 
             String diagnosticText = new String(diagnostics.toByteArray(), StandardCharsets.UTF_8).trim();
             if (process.exitValue() != 0) {
-                throw new CodexExitException(process.exitValue(), lastUsefulText(diagnosticText));
+                String failure = lastUsefulText(diagnosticText);
+                if (model != null && !model.trim().isEmpty() && isUnsupportedModelError(failure)) {
+                    listener.onProgress("Selected model is unavailable; retrying with Codex default.");
+                    return runCodex(request, sessionId, approveWrites, "", reasoningEffort, images, listener);
+                }
+                throw new CodexExitException(process.exitValue(), failure);
             }
             if (!outputFile.isFile() || outputFile.length() == 0L) {
                 throw new IOException("Codex CLI completed without a reply" + suffix(diagnosticText));
@@ -161,7 +212,18 @@ public final class CodexCliService {
         }
     }
 
-    static List<String> buildCommand(String executable, File outputFile, String prompt, String sessionId, boolean approveWrites) {
+    static boolean isUnsupportedModelError(String text) {
+        String value = text == null ? "" : text.toLowerCase(java.util.Locale.ROOT);
+        return value.contains("model is not supported") || value.contains("model is unavailable") || value.contains("unknown model");
+    }
+
+    static List<String> buildCommand(String executable, File outputFile, String prompt, String sessionId,
+                                     boolean approveWrites, List<File> images) {
+        return buildCommand(executable, outputFile, prompt, sessionId, approveWrites, "", "", images);
+    }
+
+    static List<String> buildCommand(String executable, File outputFile, String prompt, String sessionId,
+                                     boolean approveWrites, String model, String reasoningEffort, List<File> images) {
         List<String> command = new ArrayList<String>();
         if (sessionId == null || sessionId.trim().isEmpty()) {
             command.addAll(Arrays.asList(
@@ -170,7 +232,7 @@ public final class CodexCliService {
                 "--json",
                 "--skip-git-repo-check",
                 "--sandbox",
-                "read-only"
+                "workspace-write"
             ));
         } else {
             command.addAll(Arrays.asList(
@@ -180,15 +242,45 @@ public final class CodexCliService {
                 "--json",
                 "--skip-git-repo-check",
                 "-c",
-                "sandbox_mode=\"read-only\""
+                "sandbox_mode=\"workspace-write\""
             ));
         }
+        if (model != null && !model.trim().isEmpty()) { command.add("-c"); command.add("model=\"" + model.trim() + "\""); }
+        if (reasoningEffort != null && !reasoningEffort.trim().isEmpty()) { command.add("-c"); command.add("model_reasoning_effort=\"" + reasoningEffort.trim() + "\""); }
         addBuilderApprovalOverrides(command, approveWrites);
+        for (File image : validateImages(images)) {
+            command.add("--image");
+            command.add(image.getAbsolutePath());
+        }
         command.add("--output-last-message");
         command.add(outputFile.getAbsolutePath());
         if (sessionId != null && !sessionId.trim().isEmpty()) command.add(sessionId);
         command.add(prompt);
         return command;
+    }
+
+    static List<File> validateImages(List<File> images) {
+        if (images == null || images.isEmpty()) return Collections.emptyList();
+        if (images.size() > MAX_IMAGES) throw new IllegalArgumentException("attach at most " + MAX_IMAGES + " images");
+        List<File> validated = new ArrayList<File>();
+        for (File image : images) {
+            if (image == null) throw new IllegalArgumentException("image path is missing");
+            File absolute = image.getAbsoluteFile();
+            String name = absolute.getName().toLowerCase(java.util.Locale.ROOT);
+            if (!absolute.isFile()) throw new IllegalArgumentException("image does not exist: " + absolute.getName());
+            if (!(name.endsWith(".png") || name.endsWith(".jpg") || name.endsWith(".jpeg")
+                || name.endsWith(".webp") || name.endsWith(".gif"))) {
+                throw new IllegalArgumentException("unsupported image type: " + absolute.getName());
+            }
+            if (absolute.length() <= 0L || absolute.length() > MAX_IMAGE_BYTES) {
+                throw new IllegalArgumentException("image must be between 1 byte and 20 MiB: " + absolute.getName());
+            }
+            if (absolute.getAbsolutePath().indexOf(',') >= 0) {
+                throw new IllegalArgumentException("image path must not contain a comma: " + absolute.getName());
+            }
+            validated.add(absolute);
+        }
+        return Collections.unmodifiableList(validated);
     }
 
     private static void addBuilderApprovalOverrides(List<String> command, boolean approveWrites) {
@@ -239,13 +331,22 @@ public final class CodexCliService {
         return chunks;
     }
 
+    File getConceptDirectory() {
+        return new File(new File(workingDirectory, "schematics"), "concepts");
+    }
+
     static String buildPrompt(String request) {
         return "You are replying to a Minecraft player through BuilderMod. "
             + "Answer in concise Japanese plain text suitable for Minecraft chat. "
-            + "Do not modify files or run shell commands. "
+            + "You may create or modify files and run shell commands only as needed to generate or validate schematic files for the requested build. Keep generated files under the Minecraft schematics directory; do not change unrelated files. "
             + "The target is Minecraft 1.8.9. For blocks, always default to numeric legacy block IDs, not names or modern IDs. "
             + "For FAWE patterns use forms such as 1, 1:1, 35:14, or 70%1,30%4; for set_block/fill_blocks put metadata in the data field. "
-            + "If BuilderMod MCP tools are available and the request requires Minecraft actions, use them.\n\n"
+            + "If images are attached, analyze them as visual references for the requested Minecraft build, including shape, proportions, materials, and visible details. "
+            + "If BuilderMod MCP tools are available and the request requires Minecraft actions, use them. For a substantial new build, before placement establish a visual target: use the player's supplied reference if available, otherwise generate a Minecraft-style 3D concept image with an available image generation tool. Match the desired scale, viewpoint, terrain and materials; treat the image as a design reference, not a precise block blueprint. If image generation is unavailable, do not claim to have generated an image: proceed using a concise internal design and tell the player about this limitation. When you generate a concept image, save a PNG or JPEG under .minecraft/schematics/concepts/ and put a separate final reply line in exactly this form: BUILDERMOD_CONCEPT_IMAGE: relative/path.png. Use only a relative path below that concepts directory. The game will display that file to the player. Translate the target into a block-scale design, then build using schematic or direct tools. After meaningful milestones capture_view from a viewpoint comparable to the reference, compare silhouette, proportions, palette and major details, correct meaningful differences, and inspect again. Avoid endless refinement and respect the player's request. Simple localized changes do not require concept generation. "
+            + "For complex singleplayer builds you may create a classic Alpha .schematic file under the Minecraft schematics directory and use local_paste_schematic. For singleplayer cuboids prefer local_fill_blocks. For multiplayer building, prefer FAWE by default because it uses fewer tool calls, commands, tokens, and less time: use fawe_region_edit for cuboids and fawe_workflow for shapes, masks, patterns, terrain, clipboard operations, or coordinated steps. Multiple FAWE calls are allowed for complex builds. "
+            + "Use fill_blocks or set_block only for small exact corrections or when FAWE cannot express the operation. Treat sequence_set_blocks as a last resort: use it only when the player explicitly requests timed ordered placement, or for a small sparse irregular coordinate list that FAWE cannot reasonably express. Never use sequence_set_blocks for ordinary walls, floors, solid volumes, outlines, repeated forms, or large builds.\n\n"
+            + "Before any building write, classify the task. A single localized correction or one simple isolated edit may be executed directly. If the build has multiple components, materials, shapes, stages, or likely needs multiple tool calls, treat it as a planned build: first gather only the necessary world context, then internally settle the footprint and orientation, proportions, palette, component breakdown, FAWE mapping, execution order, and verification points. Do not place blocks while this strategy is still unsettled. Execute the settled plan coarse-to-fine (main mass and structure before details), verify after meaningful milestones rather than every command, and adjust the remaining plan from observed results. Keep the internal plan concise and do not narrate it unless the player asks.\n\n"
+            + "When choosing blocks, freely consider non-full blocks such as stairs, slabs, fences, walls, panes, and trapdoors alongside full blocks if they naturally improve the result. This is an optional design possibility, not a structural rule or constraint; choose whatever forms best fit the build. Use Minecraft 1.8.9 numeric legacy IDs and metadata when needed.\n\n"
             + "Player request:\n" + request;
     }
 
@@ -284,14 +385,66 @@ public final class CodexCliService {
                 if ("web_search".equals(itemType)) {
                     return "Codex is searching the web...";
                 }
-                if ("reasoning".equals(itemType)) {
-                    return "Codex is reasoning...";
+                if ("reasoning".equals(itemType)) return "Reasoning: planning the next step...";
+            }
+            if ("item.completed".equals(type) && event.has("item") && event.get("item").isJsonObject()) {
+                JsonObject item = event.getAsJsonObject("item");
+                if ("reasoning".equals(string(item, "type"))) {
+                    String summary = reasoningSummary(item);
+                    return summary.isEmpty() ? "Reasoning: completed a planning step." : "Reasoning: " + summary;
+                }
+                if ("plan".equals(string(item, "type"))) {
+                    String summary = reasoningSummary(item);
+                    return summary.isEmpty() ? "Plan updated." : "Plan: " + summary;
                 }
             }
         } catch (RuntimeException ignored) {
             // Warnings written to stderr are mixed into this stream and are not JSON.
         }
         return null;
+    }
+
+    private static String reasoningSummary(JsonObject item) {
+        String direct = string(item, "text").trim();
+        if (!direct.isEmpty()) return trimProgress(direct);
+        if (item.has("summary")) {
+            JsonElement summary = item.get("summary");
+            if (summary.isJsonPrimitive()) return trimProgress(summary.getAsString());
+            if (summary.isJsonArray()) {
+                StringBuilder text = new StringBuilder();
+                for (JsonElement part : summary.getAsJsonArray()) {
+                    if (part.isJsonPrimitive()) text.append(part.getAsString()).append(' ');
+                    else if (part.isJsonObject()) text.append(string(part.getAsJsonObject(), "text")).append(' ');
+                }
+                return trimProgress(text.toString());
+            }
+        }
+        return "";
+    }
+
+    private static String trimProgress(String value) {
+        String normalized = value.replaceAll("\\s+", " ").trim();
+        return normalized.length() <= 240 ? normalized : normalized.substring(0, 237) + "...";
+    }
+
+    static TokenUsage tokenUsage(String line) {
+        try {
+            JsonElement parsed = new JsonParser().parse(line);
+            if (!parsed.isJsonObject()) return null;
+            JsonObject event = parsed.getAsJsonObject();
+            if (!"turn.completed".equals(string(event, "type"))
+                || !event.has("usage") || !event.get("usage").isJsonObject()) {
+                return null;
+            }
+            JsonObject usage = event.getAsJsonObject("usage");
+            long input = tokenCount(usage, "input_tokens", "inputTokens");
+            long cached = tokenCount(usage, "cached_input_tokens", "cachedInputTokens");
+            long output = tokenCount(usage, "output_tokens", "outputTokens");
+            if (input < 0L || cached < 0L || output < 0L) return null;
+            return new TokenUsage(input, cached, output);
+        } catch (RuntimeException ignored) {
+            return null;
+        }
     }
 
     static String sessionId(String line) {
@@ -314,6 +467,18 @@ public final class CodexCliService {
     private static String string(JsonObject object, String name) {
         JsonElement value = object.get(name);
         return value == null || value.isJsonNull() ? "" : value.getAsString();
+    }
+
+    private static long tokenCount(JsonObject object, String snakeName, String camelName) {
+        JsonElement value = object.has(snakeName) ? object.get(snakeName) : object.get(camelName);
+        return value == null || value.isJsonNull() ? 0L : value.getAsLong();
+    }
+
+    private synchronized void recordTokenUsage(TokenUsage usage) {
+        lastTurnUsage = usage;
+        sessionInputTokens += usage.inputTokens;
+        sessionCachedInputTokens += usage.cachedInputTokens;
+        sessionOutputTokens += usage.outputTokens;
     }
 
     private Thread startOutputReader(
@@ -339,6 +504,17 @@ public final class CodexCliService {
                                 @Override
                                 public void run() {
                                     listener.onSessionStarted(startedSessionId);
+                                }
+                            });
+                        }
+                        final TokenUsage usage = tokenUsage(line);
+                        if (usage != null) {
+                            recordTokenUsage(usage);
+                            final String usageText = describeTokenUsage();
+                            dispatch(new Runnable() {
+                                @Override
+                                public void run() {
+                                    listener.onTokenUsage(usageText);
                                 }
                             });
                         }
@@ -406,9 +582,25 @@ public final class CodexCliService {
 
         void onProgress(String message);
 
+        void onTokenUsage(String summary);
+
         void onReply(String reply);
 
         void onError(String message);
+
+        void onCancelled();
+    }
+
+    static final class TokenUsage {
+        final long inputTokens;
+        final long cachedInputTokens;
+        final long outputTokens;
+
+        private TokenUsage(long inputTokens, long cachedInputTokens, long outputTokens) {
+            this.inputTokens = inputTokens;
+            this.cachedInputTokens = cachedInputTokens;
+            this.outputTokens = outputTokens;
+        }
     }
 
     private static final class CodexExitException extends IOException {
@@ -419,6 +611,12 @@ public final class CodexCliService {
             super("Codex CLI exited with " + exitCode);
             this.exitCode = exitCode;
             this.details = details;
+        }
+    }
+
+    private static final class RequestCancelledException extends IOException {
+        private RequestCancelledException() {
+            super("Codex request cancelled");
         }
     }
 }
