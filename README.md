@@ -50,6 +50,8 @@ Only one request runs at a time. Requests have no fixed timeout, so long-running
 
 The GUI shows Codex token usage reported by JSON events: input tokens, cached input tokens, output tokens, and the accumulated session total. Codex CLI normally reports authoritative usage when a turn completes, so the display updates as soon as each usage event arrives rather than estimating tokens locally.
 
+The conversation view uses a multiline editor. Press `Enter` to insert a newline and `Ctrl+Enter` to send. `Ctrl+V` pastes text; `Ctrl+Shift+V` attaches an image from the clipboard. The `Copy` button copies the latest Codex reply, while `All` copies the full in-memory conversation transcript.
+
 
 ## Codex CLI のインストール（Windows）
 
@@ -90,6 +92,40 @@ codex debug models
 
 モデルは ChatGPT アプリと CLI で常に同じとは限りません。アカウント、プラン、CLI の版、段階的な提供状況によって変わります。BuilderMod に現在登録されている候補は `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` です。`debug models` の結果が異なる場合は、Default を選んで CLI 側の既定モデルを使ってください。選択したモデルが未対応だった場合、BuilderMod は Default を指定して同じ依頼を自動的に再試行します。
 
+## Claude Code CLI の導入（Windows）
+
+Claudeを使うには、Minecraftを起動するWindows上に **Claude Code CLI** をインストールし、CLIで初回ログインを済ませます。ClaudeのデスクトップアプリだけではBuilderModからCLIを起動できません。利用できるアカウントやインストール方法は[Claude Code公式クイックスタート](https://code.claude.com/docs/en/quickstart)を参照してください。
+
+PowerShellで公式のネイティブインストーラーを実行します。インストールが終わったら**新しい**PowerShellを開き、版を確認してください。ネイティブ版は自動更新されます。
+
+```powershell
+irm https://claude.ai/install.ps1 | iex
+claude --version
+```
+
+初回は対話モードの `claude` を実行し、表示されるログインや利用規約の案内を完了してください。終了後、認証状態とインストール状態を確認できます。
+
+```powershell
+claude
+claude auth status
+claude doctor
+```
+
+`claude` が見つからない場合はPowerShellを開き直し、それでも解決しなければ[公式のPATH設定手順](https://code.claude.com/docs/en/troubleshoot-install#verify-your-path)を確認してください。BuilderModは起動時の `PATH` から `claude.exe` または `claude.cmd` を探します。別の場所にインストールした場合は、Minecraftの起動前に `BUILDERMOD_CLAUDE_PATH` にその実行ファイルの絶対パスを設定できます。Git for WindowsはWindowsでBashツールを使う場合に推奨されますが、CLIのインストールに必須ではありません。詳しくは[公式セットアップ](https://code.claude.com/docs/en/setup)を参照してください。
+
+Minecraft内で `/builder` または `/builder gui` を実行し、GUI左上の `AI: Codex` ボタンを押して `AI: Claude` に切り替えます。簡単なメッセージを送って応答を確認してください。BuilderModは起動時にローカルMCP接続設定を `.minecraft/buildermod-claude-mcp.json` に自動生成し、Claude Codeの起動時に読み込ませます。ペアリングトークンをClaudeのグローバル設定には書き込みません。
+
+GUIの `Model` は `Default → sonnet → opus → haiku` を切り替えます。`Think` はClaude Code側に委ねられます。Claude Codeが部分イベントを出す場合は、思考の短い更新と使用中のツール名を会話GUIに表示します。単純な質問では思考イベントが出ないこともあります。
+
+続きの会話では取得したセッションIDを使って前の発言を引き継ぎます。`Clear` は履歴とセッションIDを消して新しい会話を始めます。Minecraftを終了するとBuilderMod側の会話状態は失われます。`Writes: Ask` で書き込みが拒否された場合は `Approve once` で同じ依頼を一回だけ自動承認として再試行できます。`Writes: Auto` はBuilderMod MCPツールをClaude Codeに許可します。
+
+
+## TheLow 開発 Wiki
+
+TheLow のコマンド、ダンジョン開発、サーバー固有の機能に関する依頼では、Codex は最初に読み取り専用 MCP ツール `get_thelow_wiki_page` を引数なしで呼び出し、[TheLow 開発用 Wiki](https://wikiwiki.jp/thelow-dev/) のトップページを確認します。コマンドの生成や実行前には、`page` に相対ページ名を指定して該当ページも読み、構文を確認します。例: `command/sequencecommand`。
+
+Wiki は公開情報をその都度取得します。ページは 300 KiB に制限され、`page` は Wiki 内の相対ページ名だけを受け付けます。このツールは読み取り専用で、Minecraft やサーバーへコマンドを送信しません。
+
 ## Minecraft MCP observation tools
 
 BuilderMod exposes six read-only tools for the currently loaded client world:
@@ -108,6 +144,7 @@ All world and OpenGL access is transferred to Minecraft's client thread. Request
 BuilderMod also exposes structured write tools. They are marked as destructive, non-read-only MCP tools so Codex can apply write approval policy:
 
 - `set_block`: validated Minecraft 1.8.9 `/setblock` with block data and replace/destroy/keep mode
+- `place_command_block`: place an impulse command block (ID 137) and write its command text through `/blockdata`
 - `fill_blocks`: validated `/fill` with the vanilla 32768-block limit, fill modes, and optional replace filter
 - `sequence_set_blocks`: TheLow `/sequence_setblock <seconds> blockId[:data] x y z & ...` using ordered coordinates
 - `fawe_region_edit`: bounded FAWE cuboid edit using `//pos1`, `//pos2`, then `//set`, `//replace`, `//walls`, `//faces`, or `//overlay` (up to 2,000,000 blocks)
@@ -184,4 +221,4 @@ When Codex generates a concept image, it saves a PNG or JPEG under `.minecraft/s
 
 ## Model and reasoning controls
 
-The BuilderMod conversation screen has `Model` and `Think` buttons. Each click cycles the model between Default, `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna` (the models exposed by the bundled Codex CLI catalog); reasoning cycles Default, low, medium, high, xhigh, max, and ultra. The values persist in `buildermod.cfg` and are passed to the next Codex CLI request. Choose Default to retain the Codex CLI's own configured model or reasoning effort.
+The BuilderMod conversation screen has `Model` and `Think` buttons. Each click cycles the model between Default, `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`; reasoning cycles Default, low, medium, high, xhigh, max, and ultra. The values persist in `buildermod.cfg` and are passed to the next Codex CLI request. Choose Default to retain the Codex CLI's own configured model or reasoning effort.

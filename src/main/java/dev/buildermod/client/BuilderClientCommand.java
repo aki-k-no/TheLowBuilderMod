@@ -88,18 +88,18 @@ public final class BuilderClientCommand extends CommandBase {
             boolean started = conversation.send(request, new BuilderConversation.Observer() {
                 @Override
                 public void onProgress(String message) {
-                    sender.addChatMessage(new ChatComponentText("[Codex] " + message));
+                    sender.addChatMessage(new ChatComponentText("[" + conversation.getProviderLabel() + "] " + message));
                 }
 
                 @Override
                 public void onReply(String reply) {
                     List<String> chunks = CodexCliService.splitForChat(reply);
                     if (chunks.isEmpty()) {
-                        sender.addChatMessage(new ChatComponentText("[Codex] (empty reply)"));
+                        sender.addChatMessage(new ChatComponentText("[" + conversation.getProviderLabel() + "] (empty reply)"));
                         return;
                     }
                     for (String chunk : chunks) {
-                        sender.addChatMessage(new ChatComponentText("[Codex] " + chunk));
+                        sender.addChatMessage(new ChatComponentText("[" + conversation.getProviderLabel() + "] " + chunk));
                     }
                 }
 
@@ -109,9 +109,9 @@ public final class BuilderClientCommand extends CommandBase {
                 }
             });
             if (started) {
-                sender.addChatMessage(new ChatComponentText("[BuilderMod] Codex request started..."));
+                sender.addChatMessage(new ChatComponentText("[BuilderMod] " + conversation.getProviderLabel() + " request started..."));
             } else {
-                sender.addChatMessage(new ChatComponentText("[BuilderMod] Codex is already processing another request."));
+                sender.addChatMessage(new ChatComponentText("[BuilderMod] An AI request is already running."));
             }
         } catch (IllegalArgumentException exception) {
             sender.addChatMessage(new ChatComponentText("[BuilderMod] " + exception.getMessage()));

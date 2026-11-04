@@ -35,6 +35,9 @@ import net.minecraft.client.renderer.texture.TextureUtil;
 import net.minecraft.client.shader.Framebuffer;
 import net.minecraft.entity.Entity;
 import net.minecraft.nbt.NBTTagCompound;
+import net.minecraft.tileentity.TileEntity;
+import net.minecraft.tileentity.TileEntityCommandBlock;
+import net.minecraft.command.server.CommandBlockLogic;
 import net.minecraft.util.BlockPos;
 import net.minecraft.util.MovingObjectPosition;
 import net.minecraft.world.biome.BiomeGenBase;
@@ -57,17 +60,26 @@ public final class MinecraftToolExecutor implements McpToolExecutor {
     private static final int MAX_CAPTURE_DIMENSION = 512;
     private static final int MAX_CAPTURE_PIXELS = 262144;
     private static final int MAX_CHAT_COMMAND_LENGTH = 100;
+    private static final long FAWE_FEEDBACK_TIMEOUT_MILLIS = 1500L;
 
     private final ClientTaskQueue taskQueue;
+    private final ServerChatFeedback serverChatFeedback;
 
     public MinecraftToolExecutor(ClientTaskQueue taskQueue) {
+        this(taskQueue, new ServerChatFeedback());
+    }
+
+    public MinecraftToolExecutor(ClientTaskQueue taskQueue, ServerChatFeedback serverChatFeedback) {
         this.taskQueue = taskQueue;
+        this.serverChatFeedback = serverChatFeedback;
     }
 
     @Override
     public JsonObject call(final String name, final JsonObject arguments) throws Exception {
+        if ("get_thelow_wiki_page".equals(name)) return TheLowWikiReader.read(arguments);
         if ("local_paste_schematic".equals(name)) return localPasteSchematic(arguments);
         if ("local_fill_blocks".equals(name)) return localFillBlocks(arguments);
+        if ("fawe_region_edit".equals(name) || "fawe_workflow".equals(name)) return callFaweWithFeedback(name, arguments);
         return onClientThread(new Callable<JsonObject>() {
             @Override
             public JsonObject call() throws Exception {
@@ -75,16 +87,65 @@ public final class MinecraftToolExecutor implements McpToolExecutor {
                 if ("get_height_map".equals(name)) return getHeightMap(arguments);
                 if ("get_blocks".equals(name)) return getBlocks(arguments);
                 if ("inspect_position".equals(name)) return inspectPosition(arguments);
+                if ("get_command_block".equals(name)) return getCommandBlock(arguments);
+                if ("get_command_blocks".equals(name)) return getCommandBlocks(arguments);
                 if ("summarize_blocks".equals(name)) return summarizeBlocks(arguments);
                 if ("capture_view".equals(name)) return captureView(arguments);
                 if ("set_block".equals(name)) return setBlock(arguments);
+                if ("place_command_block".equals(name)) return placeCommandBlock(arguments);
                 if ("fill_blocks".equals(name)) return fillBlocks(arguments);
                 if ("sequence_set_blocks".equals(name)) return sequenceSetBlocks(arguments);
-                if ("fawe_region_edit".equals(name)) return faweRegionEdit(arguments);
-                if ("fawe_workflow".equals(name)) return faweWorkflow(arguments);
                 throw new ToolFailure("Unknown tool: " + name);
             }
         });
+    }
+
+    private JsonObject callFaweWithFeedback(final String name, final JsonObject arguments) throws Exception {
+        final ServerChatFeedback.Capture capture = serverChatFeedback.begin();
+        JsonObject response;
+        try {
+            response = onClientThread(new Callable<JsonObject>() {
+                @Override public JsonObject call() throws Exception {
+                    if ("fawe_region_edit".equals(name)) return faweRegionEdit(arguments);
+                    return faweWorkflow(arguments);
+                }
+            });
+        } catch (Exception exception) {
+            serverChatFeedback.finish(capture, 0L);
+            throw exception;
+        }
+        List<String> messages = serverChatFeedback.finish(capture, FAWE_FEEDBACK_TIMEOUT_MILLIS);
+        JsonObject data = response.getAsJsonObject("structuredContent");
+        JsonArray feedback = new JsonArray();
+        boolean failure = false;
+        String failureMessage = null;
+        for (String message : messages) {
+            feedback.add(new com.google.gson.JsonPrimitive(message));
+            if (looksLikeFaweFailure(message)) {
+                failure = true;
+                failureMessage = message;
+            }
+        }
+        data.add("server_messages", feedback);
+        data.addProperty("server_confirmed", !messages.isEmpty());
+        data.addProperty("server_reported_error", failure);
+        if (failure) {
+            response.addProperty("isError", true);
+            response.getAsJsonArray("content").get(0).getAsJsonObject().addProperty("text",
+                "FAWE reported an error: " + failureMessage);
+        } else if (!messages.isEmpty()) {
+            response.getAsJsonArray("content").get(0).getAsJsonObject().addProperty("text",
+                "FAWE server response received: " + messages.get(messages.size() - 1));
+        }
+        return response;
+    }
+
+    static boolean looksLikeFaweFailure(String message) {
+        String text = message.toLowerCase(java.util.Locale.ROOT);
+        return text.contains("error") || text.contains("exception") || text.contains("failed")
+            || text.contains("cannot") || text.contains("not permitted") || text.contains("unknown command")
+            || message.contains("\\u30a8\\u30e9\\u30fc") || message.contains("\\u5931\\u6557") || message.contains("\\u6a29\\u9650")
+            || message.contains("\\u3067\\u304d\\u307e\\u305b\\u3093") || message.contains("\\u4e0d\\u660e\\u306a\\u30b3\\u30de\\u30f3\\u30c9");
     }
 
     private JsonObject getPlayerContext() throws ToolFailure {
@@ -192,6 +253,36 @@ public final class MinecraftToolExecutor implements McpToolExecutor {
         data.add("palette", stringArray(palette.keySet()));
         data.add("runs", runs);
         return result(data, "Read " + bounds.volume + " blocks using palette and run-length encoding.");
+    }
+
+    private JsonObject getCommandBlock(JsonObject arguments) throws ToolFailure {
+        Minecraft mc = requireWorld();
+        int x = requiredInt(arguments, "x"), y = requiredInt(arguments, "y"), z = requiredInt(arguments, "z");
+        checkY(y); BlockPos pos = new BlockPos(x, y, z); requireLoaded(mc.theWorld, pos);
+        TileEntity tile = mc.theWorld.getTileEntity(pos);
+        if (!(tile instanceof TileEntityCommandBlock)) throw new ToolFailure("No command block at " + x + "," + y + "," + z);
+        JsonObject data = commandBlockJson(pos, (TileEntityCommandBlock) tile);
+        return result(data, "Read command block at the requested position.");
+    }
+
+    private JsonObject getCommandBlocks(JsonObject arguments) throws ToolFailure {
+        Minecraft mc = requireWorld(); Bounds area = bounds(arguments, MAX_SUMMARY_VOLUME);
+        requireChunksLoaded(mc.theWorld, area.minX, area.maxX, area.minZ, area.maxZ);
+        JsonArray blocks = new JsonArray();
+        for (int y = area.minY; y <= area.maxY; y++) for (int z = area.minZ; z <= area.maxZ; z++) for (int x = area.minX; x <= area.maxX; x++) {
+            TileEntity tile = mc.theWorld.getTileEntity(new BlockPos(x, y, z));
+            if (tile instanceof TileEntityCommandBlock) blocks.add(commandBlockJson(new BlockPos(x, y, z), (TileEntityCommandBlock) tile));
+        }
+        JsonObject data = boundsJson(area); data.add("command_blocks", blocks); data.addProperty("count", blocks.size());
+        return result(data, "Read " + blocks.size() + " command blocks in the requested region.");
+    }
+
+    private JsonObject commandBlockJson(BlockPos pos, TileEntityCommandBlock tile) {
+        CommandBlockLogic logic = tile.getCommandBlockLogic(); JsonObject data = position(pos);
+        data.addProperty("command", logic.getCommand()); data.addProperty("success_count", logic.getSuccessCount());
+        data.addProperty("track_output", logic.shouldTrackOutput());
+        if (logic.getLastOutput() != null) data.addProperty("last_output", logic.getLastOutput().getUnformattedText());
+        return data;
     }
 
     private JsonObject inspectPosition(JsonObject arguments) throws ToolFailure {
@@ -390,6 +481,24 @@ public final class MinecraftToolExecutor implements McpToolExecutor {
         String mode = optionalString(arguments, "mode", "replace");
         requireOneOf(mode, "mode", "replace", "destroy", "keep");
         return sendBuildCommand(mc, buildSetBlockCommand(x, y, z, block, data, mode), 1, "set_block");
+    }
+
+    private JsonObject placeCommandBlock(JsonObject arguments) throws ToolFailure {
+        Minecraft mc = requireWorld();
+        int x = requiredInt(arguments, "x");
+        int y = requiredInt(arguments, "y");
+        int z = requiredInt(arguments, "z");
+        checkY(y);
+        String command = requiredString(arguments, "command");
+        if (command.length() > 256 || command.indexOf('\r') >= 0 || command.indexOf('\n') >= 0) {
+            throw new ToolFailure("command must be at most 256 characters and must not contain line breaks");
+        }
+        if (command.startsWith("/")) command = command.substring(1);
+        boolean trackOutput = optionalBoolean(arguments, "track_output", true);
+        List<String> commands = new ArrayList<String>();
+        commands.add(buildSetBlockCommand(x, y, z, "137", 0, "replace"));
+        commands.add(buildCommandBlockDataCommand(x, y, z, command, trackOutput));
+        return sendBuildCommands(mc, commands, 1, "place_command_block");
     }
 
     private JsonObject fillBlocks(JsonObject arguments) throws ToolFailure {
@@ -684,6 +793,11 @@ public final class MinecraftToolExecutor implements McpToolExecutor {
 
     static String buildSetBlockCommand(int x, int y, int z, String block, int data, String mode) {
         return "/setblock " + x + " " + y + " " + z + " " + block + " " + data + " " + mode;
+    }
+
+    static String buildCommandBlockDataCommand(int x, int y, int z, String command, boolean trackOutput) {
+        String escaped = command.replace("\\", "\\\\").replace("\"", "\\\"");
+        return "/blockdata " + x + " " + y + " " + z + " {Command:\"" + escaped + "\",TrackOutput:" + (trackOutput ? "1b" : "0b") + "}";
     }
 
     static String buildFillCommand(Bounds b, String block, int data, String mode, String filterBlock, Integer filterData) {

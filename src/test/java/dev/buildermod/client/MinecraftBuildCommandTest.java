@@ -15,6 +15,14 @@ public final class MinecraftBuildCommandTest {
     }
 
     @Test
+    public void formatsCommandBlockNbtWithEscapedCommand() {
+        Assert.assertEquals(
+            "/blockdata 20 60 -4 {Command:\"say \\\"hello\\\"\",TrackOutput:0b}",
+            MinecraftToolExecutor.buildCommandBlockDataCommand(20, 60, -4, "say \"hello\"", false)
+        );
+    }
+
+    @Test
     public void formatsFilteredFillCommand() {
         MinecraftToolExecutor.Bounds bounds = new MinecraftToolExecutor.Bounds(1, 2, 3, 4, 5, 6, 48);
         Assert.assertEquals(
@@ -124,5 +132,44 @@ public final class MinecraftBuildCommandTest {
         outset.addProperty("amount", 4);
         outset.addProperty("scope", "horizontal");
         Assert.assertEquals("//outset 4 -h", executor.buildFaweWorkflowStep(outset, "outset", 4));
+    }
+
+    @Test
+    public void recognizesFaweFailureMessages() {
+        Assert.assertTrue(MinecraftToolExecutor.looksLikeFaweFailure("FAWE Error: invalid pattern"));
+        Assert.assertTrue(MinecraftToolExecutor.looksLikeFaweFailure("\\u6a29\\u9650\\u304c\\u3042\\u308a\\u307e\\u305b\\u3093"));
+        Assert.assertFalse(MinecraftToolExecutor.looksLikeFaweFailure("123 blocks changed."));
+    }
+
+    @Test
+    public void extractsClaudeAssistantTextFromStreamEvent() {
+        JsonObject event = new com.google.gson.JsonParser().parse(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hello from Claude\"}]}}"
+        ).getAsJsonObject();
+        Assert.assertEquals("hello from Claude", CodexCliService.claudeAssistantText(event));
+    }
+
+    @Test
+    public void extractsNestedClaudeResultText() {
+        JsonObject event = new com.google.gson.JsonParser().parse(
+            "{\"type\":\"result\",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"nested reply\"}]}}"
+        ).getAsJsonObject();
+        Assert.assertEquals("nested reply", CodexCliService.claudeAssistantText(event));
+    }
+
+    @Test
+    public void extractsStringClaudeResultText() {
+        JsonObject event = new com.google.gson.JsonParser().parse(
+            "{\"type\":\"result\",\"result\":\"plain reply\"}"
+        ).getAsJsonObject();
+        Assert.assertEquals("plain reply", CodexCliService.claudeAssistantText(event));
+    }
+
+    @Test
+    public void reportsClaudeApiRetryFromStreamEvent() {
+        JsonObject event = new com.google.gson.JsonParser().parse(
+            "{\"type\":\"system\",\"subtype\":\"api_retry\",\"attempt\":3,\"error\":\"unknown\"}"
+        ).getAsJsonObject();
+        Assert.assertTrue(CodexCliService.claudeStreamFailure(event).contains("api_retry"));
     }
 }

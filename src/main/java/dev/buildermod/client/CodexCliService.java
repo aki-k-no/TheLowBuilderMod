@@ -19,6 +19,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Runs non-interactive Codex CLI turns without blocking Minecraft's client thread. */
 public final class CodexCliService {
@@ -39,6 +40,7 @@ public final class CodexCliService {
     private volatile Process currentProcess;
     private volatile long startedAtMillis;
     private volatile String lastProgress = "No Codex request has run yet.";
+    private volatile File claudeMcpConfig;
     private TokenUsage lastTurnUsage;
     private long sessionInputTokens;
     private long sessionCachedInputTokens;
@@ -110,6 +112,245 @@ public final class CodexCliService {
             }
         });
         return true;
+    }
+
+    public void setClaudeMcpConfig(File config) { this.claudeMcpConfig = config; }
+
+    public boolean askClaude(final String request, final String sessionId, final boolean approveWrites, final String model, final List<File> images, final Listener listener) {
+        if (request == null || request.trim().isEmpty()) throw new IllegalArgumentException("request must not be empty");
+        if (request.length() > MAX_REQUEST_LENGTH) throw new IllegalArgumentException("request is too long (maximum 4000 characters)");
+        if (!busy.compareAndSet(false, true)) return false;
+        cancellationRequested.set(false); startedAtMillis = System.currentTimeMillis(); lastProgress = "Starting Claude Code...";
+        final List<File> validated = validateImages(images);
+        executor.submit(new Runnable() { @Override public void run() {
+            try {
+                final String reply = runClaude(request, sessionId, approveWrites, model, validated, listener);
+                lastProgress = "Completed."; dispatch(new Runnable() { @Override public void run() { listener.onReply(reply); } });
+            } catch (final Exception exception) {
+                if (cancellationRequested.get() || exception instanceof RequestCancelledException) {
+                    lastProgress = "Cancelled."; dispatch(new Runnable() { @Override public void run() { listener.onCancelled(); } });
+                } else {
+                    lastProgress = "Failed: " + toClaudeUserMessage(exception); dispatch(new Runnable() { @Override public void run() { listener.onError(toClaudeUserMessage(exception)); } });
+                }
+            } finally { currentProcess = null; busy.set(false); }
+        }});
+        return true;
+    }
+
+    private String runClaude(String request, String sessionId, boolean approveWrites, String model, List<File> images, Listener listener) throws Exception {
+        if (claudeMcpConfig == null || !claudeMcpConfig.isFile()) throw new IOException("BuilderMod Claude MCP configuration is unavailable; restart Minecraft after the MCP server starts.");
+        String executable = ClaudeExecutableResolver.resolve();
+        List<String> command = buildClaudeCommand(executable, claudeMcpConfig, sessionId, approveWrites, model);
+        Process process = new ProcessBuilder(command).directory(workingDirectory).redirectErrorStream(true).start();
+        currentProcess = process;
+        final AtomicReference<String> reply = new AtomicReference<String>(); final AtomicReference<String> streamFailure = new AtomicReference<String>(); final ByteArrayOutputStream diagnostics = new ByteArrayOutputStream();
+        Thread reader = startClaudeOutputReader(process.getInputStream(), diagnostics, reply, streamFailure, listener);
+        try {
+            process.getOutputStream().write((buildPrompt(request) + claudeImageHint(images)).getBytes(StandardCharsets.UTF_8));
+        } finally {
+            process.getOutputStream().close();
+        }
+        process.waitFor(); reader.join(2000L);
+        if (process.exitValue() != 0) throw new CodexExitException(process.exitValue(), lastUsefulText(new String(diagnostics.toByteArray(), StandardCharsets.UTF_8)));
+        if (reply.get() == null || reply.get().trim().isEmpty()) {
+            String detail = streamFailure.get();
+            if (detail == null || detail.trim().isEmpty()) detail = lastUsefulText(new String(diagnostics.toByteArray(), StandardCharsets.UTF_8));
+            throw new IOException("Claude Code completed without a reply" + suffix(detail));
+        }
+        return reply.get().trim();
+    }
+
+    static List<String> buildClaudeCommand(String executable, File mcpConfig, String sessionId, boolean approveWrites, String model) {
+        List<String> command = new ArrayList<String>();
+        // Pass the prompt through stdin. Windows .cmd wrappers can mangle a quoted multiline
+        // argument, and a long prompt can exceed Windows' command-line length limit.
+        command.add(executable); command.add("-p");
+        command.add("--output-format"); command.add("stream-json"); command.add("--verbose");
+        command.add("--include-partial-messages");
+        command.add("--mcp-config"); command.add(mcpConfig.getAbsolutePath());
+        if (sessionId != null && !sessionId.trim().isEmpty()) {
+            command.add("--resume"); command.add(sessionId.trim());
+        }
+        if (model != null && !model.trim().isEmpty()) { command.add("--model"); command.add(model.trim()); }
+        // The explicit Writes: Auto choice uses Claude Code's automatic permission mode.
+        command.add("--permission-prompts"); command.add("none");
+        if (approveWrites) { command.add("--permission-mode"); command.add("auto"); }
+        return command;
+    }
+
+    private String claudeImageHint(List<File> images) {
+        if (images == null || images.isEmpty()) return "";
+        StringBuilder result = new StringBuilder("\nAttached image reference files (read them if your available tools support images):");
+        for (File image : images) result.append("\n- ").append(image.getAbsolutePath());
+        return result.toString();
+    }
+
+    private Thread startClaudeOutputReader(final InputStream input, final ByteArrayOutputStream diagnostics, final AtomicReference<String> reply, final AtomicReference<String> streamFailure, final Listener listener) {
+        Thread thread = new Thread(new Runnable() { @Override public void run() {
+            ClaudeProgressTracker progressTracker = new ClaudeProgressTracker();
+            try { BufferedReader reader = new BufferedReader(new InputStreamReader(input, StandardCharsets.UTF_8)); String line;
+                while ((line = reader.readLine()) != null) { byte[] bytes = (line + "\n").getBytes(StandardCharsets.UTF_8); if (diagnostics.size() < MAX_DIAGNOSTIC_BYTES) diagnostics.write(bytes, 0, Math.min(bytes.length, MAX_DIAGNOSTIC_BYTES - diagnostics.size()));
+                    try { JsonObject event = new JsonParser().parse(line).getAsJsonObject();
+                        final String startedSessionId = claudeSessionId(event);
+                        if (startedSessionId != null) dispatch(new Runnable() {
+                            @Override public void run() { listener.onSessionStarted(startedSessionId); }
+                        });
+                        String assistantText = claudeAssistantText(event);
+                        if (!assistantText.isEmpty()) reply.set(assistantText);
+                        String failure = claudeStreamFailure(event);
+                        if (!failure.isEmpty()) streamFailure.set(failure);
+                        String progress = progressTracker.accept(event, System.currentTimeMillis());
+                        if (progress != null && !progress.equals(lastProgress)) {
+                            lastProgress = progress;
+                            final String text = progress;
+                            dispatch(new Runnable() { @Override public void run() { listener.onProgress(text); } });
+                        }
+                    } catch (RuntimeException ignored) { }
+                }
+            } catch (IOException ignored) { }
+        }}, "BuilderMod-Claude-Output"); thread.setDaemon(true); thread.start(); return thread;
+    }
+
+    static String claudeSessionId(JsonObject event) {
+        if (!"system".equals(string(event, "type")) || !"init".equals(string(event, "subtype"))) return null;
+        String id = string(event, "session_id").trim();
+        return id.isEmpty() ? null : id;
+    }
+
+    /** Turns Claude's partial stream into a bounded set of readable progress updates. */
+    static final class ClaudeProgressTracker {
+        private final StringBuilder thinking = new StringBuilder();
+        private int thinkingIndex = -1;
+        private int previews;
+        private long lastPreviewAt;
+        private boolean streamedThinking;
+        private String lastThinkingMessage = "";
+
+        String accept(JsonObject outer, long nowMillis) {
+            String type = string(outer, "type");
+            if ("stream_event".equals(type) && outer.has("event") && outer.get("event").isJsonObject()) {
+                JsonObject event = outer.getAsJsonObject("event");
+                String eventType = string(event, "type");
+                if ("content_block_start".equals(eventType) && event.has("content_block") && event.get("content_block").isJsonObject()) {
+                    JsonObject block = event.getAsJsonObject("content_block");
+                    if ("thinking".equals(string(block, "type"))) {
+                        thinking.setLength(0);
+                        thinkingIndex = event.has("index") ? event.get("index").getAsInt() : -1;
+                        streamedThinking = true;
+                        return "Claude is thinking...";
+                    }
+                    if ("tool_use".equals(string(block, "type"))) return toolProgress(block);
+                }
+                if ("content_block_delta".equals(eventType) && event.has("delta") && event.get("delta").isJsonObject()) {
+                    JsonObject delta = event.getAsJsonObject("delta");
+                    if ("thinking_delta".equals(string(delta, "type")) && thinkingIndex >= 0
+                        && event.has("index") && event.get("index").getAsInt() == thinkingIndex) {
+                        String fragment = string(delta, "thinking");
+                        if (thinking.length() < 20000) thinking.append(fragment, 0, Math.min(fragment.length(), 20000 - thinking.length()));
+                        if (previews < 16 && nowMillis - lastPreviewAt >= 1500L && thinking.length() >= 20) {
+                            lastPreviewAt = nowMillis;
+                            previews++;
+                            return rememberThinking(thinking.toString());
+                        }
+                    }
+                }
+                if ("content_block_stop".equals(eventType) && thinkingIndex >= 0
+                    && event.has("index") && event.get("index").getAsInt() == thinkingIndex) {
+                    thinkingIndex = -1;
+                    return rememberThinking(thinking.toString());
+                }
+                return null;
+            }
+            if ("assistant".equals(type) && outer.has("message") && outer.get("message").isJsonObject()) {
+                JsonObject message = outer.getAsJsonObject("message");
+                if (message.has("content") && message.get("content").isJsonArray()) {
+                    for (JsonElement item : message.getAsJsonArray("content")) {
+                        if (!item.isJsonObject()) continue;
+                        JsonObject block = item.getAsJsonObject();
+                        if ("tool_use".equals(string(block, "type"))) return toolProgress(block);
+                        if ("thinking".equals(string(block, "type")) && !streamedThinking) {
+                            String summary = rememberThinking(string(block, "thinking"));
+                            if (summary != null) return summary;
+                        }
+                    }
+                }
+                return "Claude is responding...";
+            }
+            if ("system".equals(type) && "api_retry".equals(string(outer, "subtype"))) {
+                return "Claude API is retrying (attempt " + string(outer, "attempt") + ")...";
+            }
+            return null;
+        }
+
+        private String rememberThinking(String value) {
+            String normalized = value.replaceAll("\\s+", " ").trim();
+            if (normalized.isEmpty()) return null;
+            if (normalized.length() > 180) normalized = "..." + normalized.substring(normalized.length() - 177);
+            String message = "Thinking: " + normalized;
+            if (message.equals(lastThinkingMessage)) return null;
+            lastThinkingMessage = message;
+            return message;
+        }
+
+        private String toolProgress(JsonObject block) {
+            String name = string(block, "name");
+            return name.isEmpty() ? "Claude is using a tool..." : "Using tool: " + name;
+        }
+    }
+
+    /** Claude Code stream-json versions differ: some place final text in result, others in message.content. */
+    static String claudeAssistantText(JsonObject event) {
+        try {
+            String type = string(event, "type");
+            if (!("assistant".equals(type) || "result".equals(type)) || (event.has("is_error") && event.get("is_error").getAsBoolean())) return "";
+            return claudeTextFromElement(event).trim();
+        } catch (RuntimeException ignored) { }
+        return "";
+    }
+
+    private static String claudeTextFromElement(JsonElement value) {
+        if (value == null || value.isJsonNull()) return "";
+        if (value.isJsonArray()) {
+            StringBuilder combined = new StringBuilder();
+            for (JsonElement child : value.getAsJsonArray()) {
+                String text = claudeTextFromElement(child);
+                if (!text.isEmpty()) { if (combined.length() > 0) combined.append('\n'); combined.append(text); }
+            }
+            return combined.toString();
+        }
+        if (!value.isJsonObject()) return "";
+        JsonObject object = value.getAsJsonObject();
+        String direct = primitiveString(object.get("text"));
+        if (!direct.isEmpty()) return direct;
+        String result = primitiveString(object.get("result"));
+        if (!result.isEmpty()) return result;
+        StringBuilder nested = new StringBuilder();
+        String[] fields = {"result", "message", "content", "output"};
+        for (String field : fields) if (object.has(field)) {
+            String text = claudeTextFromElement(object.get(field));
+            if (!text.isEmpty()) { if (nested.length() > 0) nested.append('\n'); nested.append(text); }
+        }
+        return nested.toString();
+    }
+
+    private static String primitiveString(JsonElement value) {
+        return value != null && value.isJsonPrimitive() && value.getAsJsonPrimitive().isString() ? value.getAsString() : "";
+    }
+
+    static String claudeStreamFailure(JsonObject event) {
+        String type = string(event, "type");
+        String subtype = string(event, "subtype");
+        if ("system".equals(type) && ("api_retry".equals(subtype) || "api_error".equals(subtype))) {
+            String error = string(event, "error");
+            String attempt = string(event, "attempt");
+            String status = string(event, "error_status");
+            return "Claude API " + subtype + (attempt.isEmpty() ? "" : " (attempt " + attempt + ")")
+                + (status.isEmpty() ? "" : ", status " + status) + (error.isEmpty() ? "" : ": " + error);
+        }
+        if ("result".equals(type) && (event.has("is_error") && event.get("is_error").getAsBoolean())) {
+            return string(event, "result");
+        }
+        return "";
     }
 
     public boolean isBusy() {
@@ -339,6 +580,7 @@ public final class CodexCliService {
         return "You are replying to a Minecraft player through BuilderMod. "
             + "Answer in concise Japanese plain text suitable for Minecraft chat. "
             + "You may create or modify files and run shell commands only as needed to generate or validate schematic files for the requested build. Keep generated files under the Minecraft schematics directory; do not change unrelated files. "
+            + "For any TheLow command, dungeon-development, or server-specific command request, first call get_thelow_wiki_page without arguments, then read the relevant Wiki page before generating or running syntax. Treat that Wiki as the source of truth. "
             + "The target is Minecraft 1.8.9. For blocks, always default to numeric legacy block IDs, not names or modern IDs. "
             + "For FAWE patterns use forms such as 1, 1:1, 35:14, or 70%1,30%4; for set_block/fill_blocks put metadata in the data field. "
             + "If images are attached, analyze them as visual references for the requested Minecraft build, including shape, proportions, materials, and visible details. "
@@ -560,6 +802,13 @@ public final class CodexCliService {
                 + " If needed, set BUILDERMOD_CODEX_PATH to the full codex.exe path.";
         }
         return exception.getMessage() == null ? exception.getClass().getSimpleName() : exception.getMessage();
+    }
+    private static String toClaudeUserMessage(Exception exception) {
+        if (exception instanceof CodexExitException) {
+            CodexExitException exit = (CodexExitException) exception;
+            return "Claude Code CLI failed (exit " + exit.exitCode + ")" + suffix(exit.details);
+        }
+        return exception.getMessage() == null ? exception.getClass().getSimpleName() : "Claude Code: " + exception.getMessage();
     }
 
     private static String suffix(String text) {

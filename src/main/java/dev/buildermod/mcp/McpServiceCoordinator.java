@@ -2,8 +2,12 @@ package dev.buildermod.mcp;
 
 import dev.buildermod.client.ClientTaskQueue;
 import dev.buildermod.client.MinecraftToolExecutor;
+import dev.buildermod.client.ServerChatFeedback;
 import dev.buildermod.config.BuilderConfig;
 import java.io.IOException;
+import java.io.File;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 
@@ -15,14 +19,16 @@ public final class McpServiceCoordinator {
 
     private final BuilderConfig config;
     private final ClientTaskQueue taskQueue;
+    private final ServerChatFeedback serverChatFeedback;
     private PairingTokenStore tokenStore;
     private EmbeddedMcpServer server;
     private Thread shutdownHook;
     private State state = State.STOPPED;
 
-    public McpServiceCoordinator(BuilderConfig config, ClientTaskQueue taskQueue) {
+    public McpServiceCoordinator(BuilderConfig config, ClientTaskQueue taskQueue, ServerChatFeedback serverChatFeedback) {
         this.config = config;
         this.taskQueue = taskQueue;
+        this.serverChatFeedback = serverChatFeedback;
     }
 
     public synchronized void start() {
@@ -34,7 +40,7 @@ public final class McpServiceCoordinator {
 
         try {
             tokenStore = new PairingTokenStore(config.getPairingTokenFile());
-            server = new EmbeddedMcpServer(config.getPort(), tokenStore, new MinecraftToolExecutor(taskQueue));
+            server = new EmbeddedMcpServer(config.getPort(), tokenStore, new MinecraftToolExecutor(taskQueue, serverChatFeedback));
             server.start();
             state = State.RUNNING;
             shutdownHook = new Thread(new Runnable() {
@@ -79,7 +85,9 @@ public final class McpServiceCoordinator {
 
     public synchronized String describeStatus() {
         String endpoint = server == null ? "" : ", endpoint: " + server.getEndpoint();
-        String connection = hasConnectedClient() ? ", Codex connected" : ", Codex not connected";
+        // The endpoint is shared by Codex, Claude Code, and any other MCP client.  A client
+        // usually connects only when it first needs a tool, so this is not a CLI health check.
+        String connection = hasConnectedClient() ? ", MCP client connected" : ", waiting for first MCP tool call";
         return state.displayName + endpoint + connection + ", queued client tasks: " + taskQueue.pendingTasks();
     }
 
@@ -108,6 +116,18 @@ public final class McpServiceCoordinator {
 
     public synchronized boolean hasConnectedClient() {
         return server != null && server.getLastAuthenticatedAt() > 0L;
+    }
+
+    /** Creates the private per-game launch config consumed by Claude Code's --mcp-config option. */
+    public synchronized File writeClaudeMcpConfig(File minecraftDirectory) throws IOException {
+        if (server == null || tokenStore == null) throw new IOException("MCP server is not running");
+        File target = new File(minecraftDirectory, "buildermod-claude-mcp.json");
+        String endpoint = server.getEndpoint().replace("\\", "\\\\").replace("\"", "\\\"");
+        String token = tokenStore.getToken().replace("\\", "\\\\").replace("\"", "\\\"");
+        String json = "{\n  \"mcpServers\": {\n    \"buildermod\": {\n      \"type\": \"http\",\n      \"url\": \"" + endpoint + "\",\n      \"headers\": { \"Authorization\": \"Bearer " + token + "\" }\n    }\n  }\n}\n";
+        Files.write(target.toPath(), json.getBytes(StandardCharsets.UTF_8));
+        target.setReadable(false, false); target.setWritable(false, false); target.setReadable(true, true); target.setWritable(true, true);
+        return target;
     }
 
     private enum State {

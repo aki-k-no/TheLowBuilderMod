@@ -66,6 +66,20 @@ public final class CodexCliServiceTest {
     }
 
     @Test
+    public void claudeFollowUpResumesTheCapturedSession() {
+        String id = "01a00432-dddb-7d43-90ef-134938942d78";
+        com.google.gson.JsonObject init = new com.google.gson.JsonParser().parse(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"" + id + "\"}"
+        ).getAsJsonObject();
+        Assert.assertEquals(id, CodexCliService.claudeSessionId(init));
+        List<String> command = CodexCliService.buildClaudeCommand("claude.exe", new File("mcp.json"), id, false, "sonnet");
+        Assert.assertEquals(id, command.get(command.indexOf("--resume") + 1));
+        Assert.assertTrue(command.contains("--include-partial-messages"));
+        Assert.assertFalse(command.contains("--permission-mode"));
+        Assert.assertFalse(CodexCliService.buildClaudeCommand("claude.exe", new File("mcp.json"), null, false, "").contains("--resume"));
+    }
+
+    @Test
     public void convertsJsonEventsToProgressMessages() {
         Assert.assertEquals(
             "Codex is thinking...",

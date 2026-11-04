@@ -8,7 +8,7 @@ import java.util.List;
 
 /** In-memory conversation state shared by the command and the BuilderMod GUI. */
 public final class BuilderConversation {
-    private static final int MAX_MESSAGES = 200;
+    private static final int MAX_MESSAGES = 5000;
 
     private final CodexCliService codexCliService;
     private final BuilderConfig config;
@@ -47,11 +47,21 @@ public final class BuilderConversation {
     private boolean startRequest(final String request, boolean approveWrites, boolean addUserMessage,
                                  final List<File> images, final Observer observer) {
         if (addUserMessage) addMessage(Role.USER, request + attachmentSummary(images));
-        progress = approveWrites ? "Starting Codex (auto-approved)..." : "Starting Codex (approval required for writes)...";
+        String providerName = "claude".equals(config.getProvider()) ? "Claude" : "Codex";
+        progress = approveWrites ? "Starting " + providerName + " (auto-approved)..." : "Starting " + providerName + " (approval required for writes)...";
         final String sessionToResume = getSessionId();
         boolean started;
         try {
-            started = codexCliService.ask(request, sessionToResume, approveWrites, config.getCodexModel(), config.getCodexReasoningEffort(), images, new CodexCliService.Listener() {
+            started = "claude".equals(config.getProvider())
+                ? codexCliService.askClaude(request, sessionToResume, approveWrites, config.getClaudeModel(), images, new CodexCliService.Listener() {
+                    @Override public void onSessionStarted(String id) { setSessionId(id); }
+                    @Override public void onProgress(String message) { handleProgress(message, observer); }
+                    @Override public void onTokenUsage(String summary) { if (observer != null) observer.onProgress(summary); }
+                    @Override public void onReply(String reply) { handleReply(reply, request, images, observer); }
+                    @Override public void onError(String message) { handleError(message, request, images, observer); }
+                    @Override public void onCancelled() { handleCancelled(observer); }
+                })
+                : codexCliService.ask(request, sessionToResume, approveWrites, config.getCodexModel(), config.getCodexReasoningEffort(), images, new CodexCliService.Listener() {
             @Override
             public void onSessionStarted(String startedSessionId) {
                 setSessionId(startedSessionId);
@@ -120,6 +130,11 @@ public final class BuilderConversation {
         return started;
     }
 
+    private void handleProgress(String message, Observer observer) { progress = message; if (message != null && !message.equals(lastProgressMessage)) { lastProgressMessage = message; addMessage(Role.PROGRESS, message); } if (observer != null) observer.onProgress(message); }
+    private void handleReply(String reply, String request, List<File> images, Observer observer) { if (CodexCliService.indicatesApprovalRequired(reply)) { markApprovalRequired(request, images, observer); return; } File concept = extractConceptImage(reply); addMessage(Role.ASSISTANT, reply.replaceAll("(?m)^BUILDERMOD_CONCEPT_IMAGE:.*(?:\\r?\\n|$)", "").trim(), concept); progress = "Completed"; if (observer != null) observer.onReply(reply); }
+    private void handleError(String message, String request, List<File> images, Observer observer) { if (CodexCliService.indicatesApprovalRequired(message)) { markApprovalRequired(request, images, observer); return; } addMessage(Role.ERROR, message); progress = "Failed"; if (observer != null) observer.onError(message); }
+    private void handleCancelled(Observer observer) { addMessage(Role.ERROR, "Request cancelled by user."); progress = "Cancelled"; if (observer != null) observer.onError("AI request cancelled by user."); }
+
     private void markApprovalRequired(String request, List<File> images, Observer observer) {
         synchronized (this) {
             pendingApprovalRequest = request;
@@ -156,16 +171,20 @@ public final class BuilderConversation {
     }
 
     public void cycleModel() {
-        String[] values = {"", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"};
+        if ("claude".equals(config.getProvider())) { String[] values = {"", "sonnet", "opus", "haiku"}; config.setClaudeModel(next(values, config.getClaudeModel())); return; }
+        String[] values = {"", "gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"};
         config.setCodexModel(next(values, config.getCodexModel()));
     }
     public void cycleReasoningEffort() {
+        if ("claude".equals(config.getProvider())) return;
         String[] values = {"", "low", "medium", "high", "xhigh", "max", "ultra"};
         config.setCodexReasoningEffort(next(values, config.getCodexReasoningEffort()));
     }
     private String next(String[] values, String current) { for (int i=0;i<values.length;i++) if (values[i].equals(current)) return values[(i+1)%values.length]; return values[0]; }
-    public String getModelLabel() { String value=config.getCodexModel(); return value.isEmpty() ? "Default" : value; }
-    public String getReasoningLabel() { String value=config.getCodexReasoningEffort(); return value.isEmpty() ? "Default" : value; }
+    public String getModelLabel() { String value="claude".equals(config.getProvider()) ? config.getClaudeModel() : config.getCodexModel(); return value.isEmpty() ? "Default" : value; }
+    public String getReasoningLabel() { return "claude".equals(config.getProvider()) ? "Claude managed" : (config.getCodexReasoningEffort().isEmpty() ? "Default" : config.getCodexReasoningEffort()); }
+    public void cycleProvider() { config.setProvider("claude".equals(config.getProvider()) ? "codex" : "claude"); clear(); }
+    public String getProviderLabel() { return "claude".equals(config.getProvider()) ? "Claude" : "Codex"; }
 
     public boolean isAutoApproveWrites() {
         return config.isAutoApproveWrites();
@@ -176,6 +195,16 @@ public final class BuilderConversation {
         synchronized (this) {
             progress = value ? "Auto-approval enabled" : "Write approval required";
         }
+    }
+
+    public synchronized String copyLastAssistantReply() {
+        for (int i = messages.size() - 1; i >= 0; i--) if (messages.get(i).getRole() == Role.ASSISTANT) return messages.get(i).getText();
+        return "";
+    }
+    public synchronized String copyTranscript() {
+        StringBuilder value = new StringBuilder();
+        for (Message message : messages) { if (value.length() > 0) value.append("\n\n"); value.append(message.getRole().name()).append(": ").append(message.getText()); }
+        return value.toString();
     }
 
     public synchronized List<Message> snapshot() {

@@ -4,10 +4,11 @@ import java.io.File;
 import net.minecraftforge.common.config.Configuration;
 
 public final class BuilderConfig {
-    private static final String[] SUPPORTED_MODELS = {"", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"};
+    private static final String[] SUPPORTED_MODELS = {"", "gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"};
     private static final String[] SUPPORTED_REASONING = {"", "low", "medium", "high", "xhigh", "max", "ultra"};
     private static final String CATEGORY_MCP = "mcp";
     private static final String CATEGORY_CODEX = "codex";
+    private static final String CATEGORY_AI = "ai";
 
     private final File configFile;
     private final boolean enabled;
@@ -16,8 +17,10 @@ public final class BuilderConfig {
     private volatile boolean autoApproveWrites;
     private volatile String codexModel;
     private volatile String codexReasoningEffort;
+    private volatile String provider;
+    private volatile String claudeModel;
 
-    private BuilderConfig(File configFile, boolean enabled, int port, File pairingTokenFile, boolean autoApproveWrites, String codexModel, String codexReasoningEffort) {
+    private BuilderConfig(File configFile, boolean enabled, int port, File pairingTokenFile, boolean autoApproveWrites, String codexModel, String codexReasoningEffort, String provider, String claudeModel) {
         this.configFile = configFile;
         this.enabled = enabled;
         this.port = port;
@@ -25,6 +28,8 @@ public final class BuilderConfig {
         this.autoApproveWrites = autoApproveWrites;
         this.codexModel = codexModel;
         this.codexReasoningEffort = codexReasoningEffort;
+        this.provider = provider;
+        this.claudeModel = claudeModel;
     }
 
     public static BuilderConfig load(File file) {
@@ -55,8 +60,11 @@ public final class BuilderConfig {
             String reasoning = config.getString("reasoningEffort", CATEGORY_CODEX, "", "Optional reasoning effort override; empty uses the Codex default.");
             if (!contains(SUPPORTED_MODELS, model)) { model = ""; config.get(CATEGORY_CODEX, "model", "", "Optional Codex model override; empty uses the Codex default.").set(""); }
             if (!contains(SUPPORTED_REASONING, reasoning)) { reasoning = ""; config.get(CATEGORY_CODEX, "reasoningEffort", "", "Optional reasoning effort override; empty uses the Codex default.").set(""); }
+            String provider = config.getString("provider", CATEGORY_AI, "codex", "AI CLI backend: codex or claude.");
+            if (!("codex".equals(provider) || "claude".equals(provider))) { provider = "codex"; config.get(CATEGORY_AI, "provider", "codex", "AI CLI backend: codex or claude.").set("codex"); }
+            String claudeModel = config.getString("claudeModel", CATEGORY_AI, "", "Optional Claude model override; empty uses Claude Code default.");
             File parent = file.getAbsoluteFile().getParentFile();
-            return new BuilderConfig(file, enabled, port, new File(parent, "buildermod-pairing.token"), autoApproveWrites, model, reasoning);
+            return new BuilderConfig(file, enabled, port, new File(parent, "buildermod-pairing.token"), autoApproveWrites, model, reasoning, provider, claudeModel);
         } finally {
             if (config.hasChanged()) {
                 config.save();
@@ -86,7 +94,12 @@ public final class BuilderConfig {
     public synchronized String getCodexReasoningEffort() { return codexReasoningEffort; }
     public synchronized void setCodexModel(String value) { setCodexChoice("model", value, "Optional Codex model override; empty uses the Codex default."); codexModel = value; }
     public synchronized void setCodexReasoningEffort(String value) { setCodexChoice("reasoningEffort", value, "Optional reasoning effort override; empty uses the Codex default."); codexReasoningEffort = value; }
+    public synchronized String getProvider() { return provider; }
+    public synchronized void setProvider(String value) { setAiChoice("provider", value, "AI CLI backend: codex or claude."); provider = value; }
+    public synchronized String getClaudeModel() { return claudeModel; }
+    public synchronized void setClaudeModel(String value) { setAiChoice("claudeModel", value, "Optional Claude model override; empty uses Claude Code default."); claudeModel = value; }
     private void setCodexChoice(String key, String value, String comment) { Configuration config = new Configuration(configFile); try { config.load(); config.get(CATEGORY_CODEX, key, "", comment).set(value); } finally { if (config.hasChanged()) config.save(); } }
+    private void setAiChoice(String key, String value, String comment) { Configuration config = new Configuration(configFile); try { config.load(); config.get(CATEGORY_AI, key, "", comment).set(value); } finally { if (config.hasChanged()) config.save(); } }
 
     public synchronized void setAutoApproveWrites(boolean value) {
         Configuration config = new Configuration(configFile);

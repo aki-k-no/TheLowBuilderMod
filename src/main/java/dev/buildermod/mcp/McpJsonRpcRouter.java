@@ -152,6 +152,9 @@ final class McpJsonRpcRouter {
 
     private JsonArray tools() {
         JsonArray tools = new JsonArray();
+        tools.add(tool("get_thelow_wiki_page",
+            "Read a current public page from TheLow development Wiki (wikiwiki.jp/thelow-dev). Before creating, explaining, or running a TheLow command or dungeon-development workflow, call this with no arguments to read the top page. Then call it with a relevant page name, such as command/sequencecommand, to verify exact syntax.",
+            schema(new String[0], property("page", "string", "Optional relative Wiki page name; omit for the top page")), true));
         tools.add(tool("get_player_context",
             "Get the player's position, view direction, dimension, game mode, world time, weather, and targeted block.",
             objectSchema(), true));
@@ -166,6 +169,12 @@ final class McpJsonRpcRouter {
         tools.add(tool("get_blocks",
             "Read exact cuboid blocks as palette+RLE. Maximum volume 32768; max_runs limits worst-case output.",
             getBlocksSchema(), true));
+        tools.add(tool("get_command_block",
+            "Read the command text and execution status from one loaded Minecraft 1.8.9 command block. Fails if the position is not a command block.",
+            schema(new String[] {"x", "y", "z"}, property("x", "integer", "World X"), rangedProperty("y", "integer", "World Y", 0, 255), property("z", "integer", "World Z")), true));
+        tools.add(tool("get_command_blocks",
+            "Read every command block in an inclusive loaded cuboid, including command text, track-output setting, success count, and latest output. Maximum volume 262144.",
+            boundsSchema(), true));
         tools.add(tool("inspect_position",
             "Inspect one block position including state, material, light, sky visibility, biome, and tile-entity type.",
             schema(new String[] {"x", "y", "z"},
@@ -227,6 +236,12 @@ final class McpJsonRpcRouter {
                 property("block", "string", "Minecraft 1.8.9 numeric legacy block ID as a string, e.g. 1 for stone; use the data field for metadata"),
                 rangedProperty("data", "integer", "Legacy block data; default 0", 0, 15),
                 enumProperty("mode", "Placement mode; default replace", "replace", "destroy", "keep"))));
+        tools.add(writeTool("place_command_block",
+            "Place a Minecraft 1.8.9 impulse command block (legacy ID 137) at an exact coordinate, then set its Command NBT with /blockdata. Supply the command without a leading slash; a leading slash is removed. This requires server permission for both /setblock and /blockdata, and Minecraft chat commands are limited to 100 characters.",
+            schema(new String[] {"x", "y", "z", "command"},
+                property("x", "integer", "World X"), rangedProperty("y", "integer", "World Y", 0, 255),
+                property("z", "integer", "World Z"), property("command", "string", "Command-block command, normally without a leading slash"),
+                property("track_output", "boolean", "Store last command output; default true"))));
         tools.add(writeTool("fill_blocks",
             "Send one Minecraft 1.8.9 /fill command for at most 32768 blocks. Prefer fawe_region_edit for ordinary building regions; use this only when exact vanilla fill semantics are useful or FAWE is unsuitable. Use numeric legacy block IDs by default. Optional filter applies only in replace mode.",
             schema(new String[] {"min_x", "min_y", "min_z", "max_x", "max_y", "max_z", "block"},
@@ -413,15 +428,19 @@ final class McpJsonRpcRouter {
     }
 
     private boolean isKnownTool(String name) {
-        return "get_player_context".equals(name)
+        return "get_thelow_wiki_page".equals(name)
+            || "get_player_context".equals(name)
             || "get_height_map".equals(name)
             || "get_blocks".equals(name)
+            || "get_command_block".equals(name)
+            || "get_command_blocks".equals(name)
             || "inspect_position".equals(name)
             || "summarize_blocks".equals(name)
             || "capture_view".equals(name)
             || "local_paste_schematic".equals(name)
             || "local_fill_blocks".equals(name)
             || "set_block".equals(name)
+            || "place_command_block".equals(name)
             || "fill_blocks".equals(name)
             || "sequence_set_blocks".equals(name)
             || "fawe_region_edit".equals(name)
@@ -429,12 +448,12 @@ final class McpJsonRpcRouter {
     }
 
     private String instructions() {
-        return "This is Minecraft 1.8.9. For every placed, replaced, masked, or generated block, use numeric legacy block IDs by default; do not use modern or namespaced block names unless the player explicitly confirms support. "
+        return "Before any TheLow command, dungeon-development, or server-specific command request, first call get_thelow_wiki_page with no arguments. Read a relevant linked page too before generating syntax or executing a command; the public Wiki is the source of truth. This is Minecraft 1.8.9. For every placed, replaced, masked, or generated block, use numeric legacy block IDs by default; do not use modern or namespaced block names unless the player explicitly confirms support. "
             + "Use ID:data in FAWE patterns (for example 1, 1:1, 35:14, or 70%1,30%4) and use the separate data field in set_block/fill_blocks. Common IDs: air=0, stone=1, grass=2, dirt=3, cobblestone=4, planks=5, log=17, glass=20, wool=35, bricks=45, stonebrick=98, quartz=155, stained_clay=159. "
-            + "Observe the loaded Minecraft client world, then build using the available tools. For substantial new builds, use the player's reference or generate a Minecraft-style 3D concept image if an image generation tool is available; if not, be honest and proceed with an internal design. Translate the target into a block-scale design, build, capture_view from a comparable viewpoint, compare silhouette, proportions, palette and details, and correct meaningful differences at milestones. Simple isolated edits do not need a concept image. Call get_player_context when coordinates are unknown. "
+            + "Observe the loaded Minecraft client world, then build using the available tools. Use get_command_block or get_command_blocks to inspect existing command-block logic before editing or extending a command-driven mechanism. For substantial new builds, use the player's reference or generate a Minecraft-style 3D concept image if an image generation tool is available; if not, be honest and proceed with an internal design. Translate the target into a block-scale design, build, capture_view from a comparable viewpoint, compare silhouette, proportions, palette and details, and correct meaningful differences at milestones. Simple isolated edits do not need a concept image. Call get_player_context when coordinates are unknown. "
             + "For low token use: summarize_blocks first, then get_blocks only on needed subregions; omit height-map top blocks unless needed; "
             + "use sample_step for broad surveys and capture_view last. In singleplayer, for complex custom builds you may create a classic Alpha .schematic file in the Minecraft schematics directory and paste it with local_paste_schematic. For cuboids prefer local_fill_blocks; it directly updates the local world. In multiplayer FAWE is the default for building because it minimizes tool calls, commands, tokens, and time: prefer fawe_region_edit for cuboids and fawe_workflow for shapes, masks, patterns, terrain, clipboard operations, and coordinated steps; make multiple FAWE calls when needed. "
-            + "Use set_block/fill_blocks only for small exact corrections or special vanilla semantics. sequence_set_blocks is a last resort only for explicitly requested timed placement or small sparse irregular coordinates that FAWE cannot express; never use it for ordinary walls, floors, regions, outlines, repeated shapes, or large builds. "
+            + "Use set_block/fill_blocks only for small exact corrections or special vanilla semantics. Use place_command_block when a Minecraft 1.8.9 impulse command block must be placed with its command text; inspect it afterward with get_command_block when server permission allows. sequence_set_blocks is a last resort only for explicitly requested timed placement or small sparse irregular coordinates that FAWE cannot express; never use it for ordinary walls, floors, regions, outlines, repeated shapes, or large builds. "
             + "Before the first write, classify the request: a single localized correction may execute directly, but a build with multiple components, materials, shapes, stages, or expected tool calls requires a concise internal plan first. Gather only necessary context, then settle footprint/orientation, proportions, palette, components, FAWE operations, execution order, and verification milestones before placing blocks. Execute coarse-to-fine, verify after meaningful stages, and adapt remaining steps from observations; do not spend tokens narrating the internal plan unless asked. "
             + "When selecting blocks, freely consider non-full blocks such as stairs, slabs, fences, walls, panes, and trapdoors alongside full blocks if they naturally improve the result. This is an optional design possibility, not a structural rule or constraint; use whichever forms best fit the build. Apply Minecraft 1.8.9 numeric legacy IDs and metadata when needed. "
             + "Include explicit pos1/pos2 steps for selection-based edits and leave clear_global_state enabled unless persistence is intentional. All building tools write to the server and may require approval. "
