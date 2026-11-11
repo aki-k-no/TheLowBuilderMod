@@ -33,7 +33,7 @@ public final class BuilderClientCommand extends CommandBase {
 
     @Override
     public String getCommandUsage(ICommandSender sender) {
-        return "/builder [gui|ask <message>|cancel|status|codex connect]";
+        return "/builder [gui|ask <message>|cancel|status|codex connect|sheet [gui|add <name> <url>|remove <name>|list|connect|status]]";
     }
 
     @Override
@@ -59,6 +59,15 @@ public final class BuilderClientCommand extends CommandBase {
             });
             return;
         }
+        if ((args.length == 1 || (args.length == 2 && "gui".equalsIgnoreCase(args[1])))
+            && "sheet".equalsIgnoreCase(args[0])) {
+            clientTaskQueue.submit(new Runnable() {
+                @Override public void run() {
+                    Minecraft.getMinecraft().displayGuiScreen(new BuilderSheetScreen(mcpService.getGoogleSheets()));
+                }
+            });
+            return;
+        }
         if (args.length >= 2 && "ask".equalsIgnoreCase(args[0])) {
             askCodex(sender, join(args, 1));
             return;
@@ -66,6 +75,40 @@ public final class BuilderClientCommand extends CommandBase {
         if (args.length == 1 && "status".equalsIgnoreCase(args[0])) {
             sender.addChatMessage(new ChatComponentText("[BuilderMod] " + mcpService.describeStatus()));
             sender.addChatMessage(new ChatComponentText("[BuilderMod] " + codexCliService.describeStatus()));
+            sender.addChatMessage(new ChatComponentText("[BuilderMod] " + mcpService.getGoogleSheets().status()));
+            return;
+        }
+        if (args.length == 3 && "sheet".equalsIgnoreCase(args[0]) && "set".equalsIgnoreCase(args[1])) {
+            try { sender.addChatMessage(new ChatComponentText("[BuilderMod] " + mcpService.getGoogleSheets().setSheetUrl(args[2]))); }
+            catch (IllegalArgumentException error) { sender.addChatMessage(new ChatComponentText("[BuilderMod] " + error.getMessage())); }
+            return;
+        }
+        if (args.length == 4 && "sheet".equalsIgnoreCase(args[0]) && "add".equalsIgnoreCase(args[1])) {
+            try { sender.addChatMessage(new ChatComponentText("[BuilderMod] " + mcpService.getGoogleSheets().addSheet(args[2], args[3]))); }
+            catch (IllegalArgumentException error) { sender.addChatMessage(new ChatComponentText("[BuilderMod] " + error.getMessage())); }
+            return;
+        }
+        if (args.length == 3 && "sheet".equalsIgnoreCase(args[0]) && "remove".equalsIgnoreCase(args[1])) {
+            sender.addChatMessage(new ChatComponentText("[BuilderMod] " + mcpService.getGoogleSheets().removeSheet(args[2])));
+            return;
+        }
+        if (args.length == 2 && "sheet".equalsIgnoreCase(args[0]) && "list".equalsIgnoreCase(args[1])) {
+            sender.addChatMessage(new ChatComponentText("[BuilderMod] " + mcpService.getGoogleSheets().listNames()));
+            return;
+        }
+        if (args.length == 2 && "sheet".equalsIgnoreCase(args[0]) && "status".equalsIgnoreCase(args[1])) {
+            sender.addChatMessage(new ChatComponentText("[BuilderMod] " + mcpService.getGoogleSheets().status()));
+            return;
+        }
+        if (args.length == 2 && "sheet".equalsIgnoreCase(args[0]) && "connect".equalsIgnoreCase(args[1])) {
+            boolean started = mcpService.getGoogleSheets().connect(new java.util.function.Consumer<String>() {
+                @Override public void accept(final String message) {
+                    clientTaskQueue.submit(new Runnable() { @Override public void run() {
+                        sender.addChatMessage(new ChatComponentText("[BuilderMod] " + message));
+                    }});
+                }
+            });
+            sender.addChatMessage(new ChatComponentText("[BuilderMod] " + (started ? "Opening Google sign-in in your browser..." : "Google sign-in is already running.")));
             return;
         }
         if (args.length == 1 && "cancel".equalsIgnoreCase(args[0])) {
@@ -132,10 +175,13 @@ public final class BuilderClientCommand extends CommandBase {
     @Override
     public List<String> addTabCompletionOptions(ICommandSender sender, String[] args, net.minecraft.util.BlockPos pos) {
         if (args.length == 1) {
-            return getListOfStringsMatchingLastWord(args, Arrays.asList("gui", "ask", "cancel", "status", "codex"));
+            return getListOfStringsMatchingLastWord(args, Arrays.asList("gui", "ask", "cancel", "status", "codex", "sheet"));
         }
         if (args.length == 2 && "codex".equalsIgnoreCase(args[0])) {
             return getListOfStringsMatchingLastWord(args, Arrays.asList("connect"));
+        }
+        if (args.length == 2 && "sheet".equalsIgnoreCase(args[0])) {
+            return getListOfStringsMatchingLastWord(args, Arrays.asList("gui", "add", "remove", "list", "connect", "status", "set"));
         }
         return null;
     }

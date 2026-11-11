@@ -1,6 +1,8 @@
 package dev.buildermod.client;
 
 import com.google.gson.JsonObject;
+import com.google.gson.JsonArray;
+import net.minecraft.network.PacketBuffer;
 import java.util.Arrays;
 import org.junit.Assert;
 import org.junit.Test;
@@ -15,11 +17,46 @@ public final class MinecraftBuildCommandTest {
     }
 
     @Test
+    public void formatsTeleportWithExactPlayerAndDecimalCoordinates() {
+        Assert.assertEquals("/tp Builder_1 12.5 64 -3", MinecraftToolExecutor.buildTeleportCommand("Builder_1", 12.5D, 64D, -3D));
+    }
+
+    @Test
     public void formatsCommandBlockNbtWithEscapedCommand() {
         Assert.assertEquals(
             "/blockdata 20 60 -4 {Command:\"say \\\"hello\\\"\",TrackOutput:0b}",
             MinecraftToolExecutor.buildCommandBlockDataCommand(20, 60, -4, "say \"hello\"", false)
         );
+    }
+
+    @Test
+    public void commandBlockFeedbackReportsPermissionDenialAndMissingBlock() {
+        JsonObject response = new JsonObject();
+        response.add("structuredContent", new JsonObject());
+        JsonObject item = new JsonObject(); item.addProperty("type", "text"); item.addProperty("text", "sent");
+        JsonArray content = new JsonArray(); content.add(item); response.add("content", content);
+        JsonObject observation = new JsonObject();
+        observation.addProperty("position_loaded", true);
+        observation.addProperty("block_observed", false);
+        MinecraftToolExecutor.commandBlockResult(response,
+            Arrays.asList("You do not have permission to use this command"), observation);
+        Assert.assertTrue(response.get("isError").getAsBoolean());
+        Assert.assertFalse(response.getAsJsonObject("structuredContent").get("server_confirmed").getAsBoolean());
+        Assert.assertTrue(response.getAsJsonArray("content").get(0).getAsJsonObject().get("text").getAsString().contains("not observed"));
+    }
+
+    @Test
+    public void longCommandBlockTextUsesTheEditorPayloadFormat() throws Exception {
+        String longCommand = "say " + new String(new char[150]).replace('\0', 'x');
+        PacketBuffer payload = MinecraftToolExecutor.buildCommandBlockPayload(-5503, 9, -1495, longCommand, false);
+        try {
+            Assert.assertEquals(0, payload.readByte());
+            Assert.assertEquals(-5503, payload.readInt());
+            Assert.assertEquals(9, payload.readInt());
+            Assert.assertEquals(-1495, payload.readInt());
+            Assert.assertEquals(longCommand, payload.readStringFromBuffer(32767));
+            Assert.assertFalse(payload.readBoolean());
+        } finally { payload.release(); }
     }
 
     @Test

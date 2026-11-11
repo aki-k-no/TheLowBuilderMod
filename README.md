@@ -1,6 +1,6 @@
 # BuilderMod
 
-Minecraft 1.8.9 のクライアント内でローカル MCP サーバーを動かし、AI Agentから建築操作を受け取るためのForge Modです。
+Minecraft 1.8.9 のクライアント内でローカル MCP サーバーを動かし、AIエージェントから建築操作を受け取るForge製Modです。
 
 ## 実装済み
 
@@ -8,13 +8,13 @@ Minecraft 1.8.9 のクライアント内でローカル MCP サーバーを動�
 - Mod起動時の組み込みMCPサーバー自動起動
 - Streamable HTTPエンドポイント `http://127.0.0.1:25585/mcp`
 - MCP `2026-07-28` の `server/discover` と、従来版の `initialize` に対応
-- `ping` と空の `tools/list`
+- `ping` と建築・観察・シート参照用の `tools/list`
 - 256bitランダムトークンによるBearer認証
 - Minecraft内からCodexへワンクリック登録
 - Agent由来の処理をMinecraftのメインスレッドへ渡すキュー
 - `/buildermod status` と `/buildermod codex connect` クライアントコマンド
 
-建築用MCPツールと、Minecraftサーバーへ送るコマンドAPIはまだ登録していません。
+建築用MCPツールとMinecraftサーバーへ送るコマンドは、後述の各ツールから利用できます。
 
 ## セキュリティ
 
@@ -30,27 +30,27 @@ MCPサーバーは外部インターフェースへ公開せず、IPv4ループ�
 /buildermod codex connect
 ```
 
-## Ask Codex from Minecraft
+## MinecraftからCodexに依頼する
 
-BuilderMod can run the locally installed Codex CLI without overriding the user's default model or reasoning effort. The request runs on a background thread and the final reply is returned to Minecraft chat.
+BuilderModは、ローカルにインストールされたCodex CLIを起動できます。モデルや思考量を指定しなければ、Codex CLI側の既定値を使います。処理はバックグラウンドで実行され、最終回答がMinecraftのチャットに届きます。
 
 ```text
 /builder ask <message>
 ```
 
-Codex JSONL progress events are forwarded to Minecraft chat. Use `/builder status` at any time to see the elapsed time and most recent progress event.
+Codexの進行状況はJSONLイベントからMinecraftのチャットへ転送されます。`/builder status` で経過時間と直近の進行状況を確認できます。
 
-Run `/builder` or `/builder gui` to open the dedicated conversation screen. Its in-memory history and Codex session survive closing and reopening the screen until Minecraft exits. Follow-up messages resume the same Codex session, so Codex retains the conversation context. Press `Clear` to discard the history and start a new session.
+`/builder` または `/builder gui` で専用の会話画面を開けます。画面を閉じても、Minecraftを終了するまでは会話履歴とCodexのセッションが残ります。続けて送ったメッセージは同じセッションで処理されます。`Clear` ボタンで履歴を消し、新しい会話を始められます。
 
-The GUI has a persistent `Writes: Ask` / `Writes: Auto` switch. `Writes: Ask` is the default. Because `codex exec` is non-interactive, a blocked BuilderMod write is shown in the conversation and exposes an `Approve once` button; pressing it retries the same request in the same session with approval for that turn only. `Writes: Auto` approves BuilderMod write tools for each GUI/command turn without changing the user's global Codex approval policy.
+会話画面には書き込み許可の切り替えボタン `Writes: Ask`／`Writes: Auto` があります。初期値の `Writes: Ask` で書き込みが拒否された場合は、会話内の `Approve once` ボタンを押すと、その依頼に限って許可して再試行します。`Writes: Auto` は各依頼でBuilderModの書き込みツールを自動許可します。Codex全体の許可設定は変更しません。
 
-Use the GUI's `Image` button to attach up to four PNG, JPEG, WebP, or GIF files (20 MiB each) to the next message. Press `Ctrl+V` to attach image pixels copied from a browser or screenshot tool, or image files copied in Explorer. If the clipboard only contains text, `Ctrl+V` keeps its normal text-paste behavior. Images work for both a new Codex session and follow-up turns. The selected paths are passed as repeated `codex exec --image` arguments; regular image files are not copied or modified by BuilderMod, while clipboard pixels are saved as temporary PNG files for the game session. The `X` button removes pending attachments.
+`Image` ボタンで、PNG・JPEG・WebP・GIF画像を次のメッセージへ最大4枚（各20 MiB）添付できます。ブラウザや画面撮影ツールでコピーした画像、エクスプローラーでコピーした画像ファイルは `Ctrl+V` でも添付できます。クリップボードが文字だけなら通常の貼り付けになります。画像は新しい会話でも続きの会話でも使えます。通常の画像ファイルは変更せず、クリップボード内の画像はゲーム終了まで一時PNGとして保存します。添付を取り消すには `X` を押します。
 
-Only one request runs at a time. Requests have no fixed timeout, so long-running Goal and building work can continue until Codex completes. While a request is running, the GUI's `Send` button changes to `Cancel`; `/builder cancel` provides the same operation from chat. The supported standalone Codex CLI must already be installed and signed in. BuilderMod checks `BUILDERMOD_CODEX_PATH`, the inherited `PATH`, and the official Windows standalone locations under `%LOCALAPPDATA%\\Programs\\OpenAI\\Codex` and `$CODEX_HOME\\packages\\standalone`. BuilderMod never copies or executes the private CLI binary inside the Windows Codex app package.
+同時に処理できる依頼は1件です。固定の時間制限はありません。処理中は `Send` ボタンが `Cancel` に変わり、チャットからは `/builder cancel` で中止できます。事前に単独版のCodex CLIをインストールしてログインしてください。BuilderModは `BUILDERMOD_CODEX_PATH`、`PATH`、Windowsの標準インストール先を順に探します。Codexデスクトップアプリ内の非公開CLIバイナリは使用しません。
 
-The GUI shows Codex token usage reported by JSON events: input tokens, cached input tokens, output tokens, and the accumulated session total. Codex CLI normally reports authoritative usage when a turn completes, so the display updates as soon as each usage event arrives rather than estimating tokens locally.
+会話画面にはCodexが報告した入力・キャッシュ済み入力・出力トークン数と、セッション累計を表示します。CLIから使用量イベントが届くたびに更新します。
 
-The conversation view uses a multiline editor. Press `Enter` to insert a newline and `Ctrl+Enter` to send. `Ctrl+V` pastes text; `Ctrl+Shift+V` attaches an image from the clipboard. The `Copy` button copies the latest Codex reply, while `All` copies the full in-memory conversation transcript.
+入力欄では `Enter` で改行、`Ctrl+Enter` で送信します。`Ctrl+V` は文字の貼り付け、`Ctrl+Shift+V` はクリップボード画像の添付です。`Copy` は最新の回答、`All` は会話全体をコピーします。
 
 
 ## Codex CLI のインストール（Windows）
@@ -90,7 +90,7 @@ codex update
 codex debug models
 ```
 
-モデルは ChatGPT アプリと CLI で常に同じとは限りません。アカウント、プラン、CLI の版、段階的な提供状況によって変わります。BuilderMod に現在登録されている候補は `gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` です。`debug models` の結果が異なる場合は、Default を選んで CLI 側の既定モデルを使ってください。選択したモデルが未対応だった場合、BuilderMod は Default を指定して同じ依頼を自動的に再試行します。
+モデルはChatGPTアプリとCLIで常に同じとは限りません。アカウント、プラン、CLIの版、段階的な提供状況によって変わります。BuilderModで選べる候補は後述の「モデルと思考量の切り替え」に記載しています。`debug models` の結果が異なる場合は、画面で `Default` を選んでCLI側の既定モデルを使ってください。選択したモデルが未対応だった場合、BuilderModは既定モデルで同じ依頼を自動的に再試行します。
 
 ## Claude Code CLI の導入（Windows）
 
@@ -126,39 +126,81 @@ TheLow のコマンド、ダンジョン開発、サーバー固有の機能に�
 
 Wiki は公開情報をその都度取得します。ページは 300 KiB に制限され、`page` は Wiki 内の相対ページ名だけを受け付けます。このツールは読み取り専用で、Minecraft やサーバーへコマンドを送信しません。
 
-## Minecraft MCP observation tools
+## 非公開のGoogleスプレッドシートを参照する
 
-BuilderMod exposes six read-only tools for the currently loaded client world:
+BuilderModはGoogleアカウントのOAuthログインを使い、名前を付けて登録した**複数のスプレッドシート**をMCPツール `list_config_sheets` と `read_config_sheet` から読み取れます。シートの内容はAIへの参考データとして渡され、シートへの書き込みは実装していません。GoogleのOAuth権限は `spreadsheets.readonly` です。この権限自体はアカウントで閲覧できる全スプレッドシートに及びますが、BuilderModのツールは登録されたIDだけを読みます。[Googleの権限の説明](https://developers.google.com/workspace/sheets/api/scopes)
 
-- `get_player_context`: player position/view, dimension, game mode, time, weather, and targeted block
-- `get_height_map`: adaptively raw/RLE terrain heights; optional top blocks and sampling (radius up to 32)
-- `capture_view`: PNG rendered from a virtual camera without moving the player (320x180 default; up to 512x512 / 262144 pixels)
-- `get_blocks`: exact cuboid data encoded as a palette and RLE, with a configurable run cap (up to 32768 blocks)
-- `inspect_position`: block, material, light, sky, biome, and tile-entity details at one position
-- `summarize_blocks`: block-state counts for a larger cuboid (up to 262144 blocks)
+### Google OAuthの初回設定
 
-All world and OpenGL access is transferred to Minecraft's client thread. Requests fail explicitly when no world is open or required chunks are not loaded. These observation tools do not place blocks or send server commands.
+非公開シートを読むには、利用者ごとにGoogle CloudのOAuthクライアントを作ります。通常のSheets API利用は追加料金なしですが、[利用枠と料金](https://developers.google.com/workspace/sheets/api/limits)を確認してください。以下は個人のGoogleアカウントで自分のシートを読む場合の手順です。[Google Sheets APIの公式クイックスタート](https://developers.google.com/workspace/sheets/api/quickstart/java)
 
-## Minecraft MCP building tools
+1. [Google Cloud Console](https://console.cloud.google.com/)で新しいプロジェクトを作成し、画面上部でそのプロジェクトが選択されていることを確認します。
+2. 「APIとサービス」→「ライブラリ」で **Google Sheets API** を探して有効化します。
+3. 「Google Auth Platform」→「Branding」で同意画面の設定を始め、アプリ名（例: `BuilderMod`）、サポート用メール、連絡先メールを入力します。
+4. 「Audience」で **External（外部）** を選択します。公開ステータスが **Testing（テスト中）** の場合は、同じ画面の「Test users（テストユーザー）」→「Add users」で、Minecraftからのログイン時に使うGoogleアカウントのメールアドレスを追加して保存します。すでに一覧にある場合は再追加不要です。[同意画面とテストユーザーの公式手順](https://developers.google.com/workspace/guides/configure-oauth-consent)
+5. 「Data Access」で読み取り用スコープ `https://www.googleapis.com/auth/spreadsheets.readonly` を設定します。
+6. 「Clients」→「Create client」でアプリの種類を **Desktop app（デスクトップアプリ）** にして作成し、クライアントJSONをダウンロードします。Web applicationやAPIキーは使いません。
+7. Minecraftで `/builder sheet` を実行し、**OAuth JSON** からダウンロードしたJSONを選びます。`Name` に登録名、`Sheet URL` にシートのURLを入力して **Save** を押します。
+8. **Sign in** を押すとブラウザが開きます。手順4のテストユーザーと同じアカウントを選択し、表示された読み取り権限を確認して許可します。ゲーム内画面にログイン完了と出たら接続成功です。複数のシートに対してログインは共通です。
 
-BuilderMod also exposes structured write tools. They are marked as destructive, non-read-only MCP tools so Codex can apply write approval policy:
+JSONはゲーム内で取り込む代わりに `.minecraft/config/buildermod-google-oauth.json` に置くこともできます。JSONや更新トークンの内容はチャットに貼らないでください。
 
-- `set_block`: validated Minecraft 1.8.9 `/setblock` with block data and replace/destroy/keep mode
-- `place_command_block`: place an impulse command block (ID 137) and write its command text through `/blockdata`
-- `fill_blocks`: validated `/fill` with the vanilla 32768-block limit, fill modes, and optional replace filter
-- `sequence_set_blocks`: TheLow `/sequence_setblock <seconds> blockId[:data] x y z & ...` using ordered coordinates
-- `fawe_region_edit`: bounded FAWE cuboid edit using `//pos1`, `//pos2`, then `//set`, `//replace`, `//walls`, `//faces`, or `//overlay` (up to 2,000,000 blocks)
-- `fawe_workflow`: up to six validated FAWE steps combining selections, global masks/transforms, region/terrain edits, generated shapes, clipboard copy/cut/paste/rotate/flip, movement, biome edits, and undo/redo. Global state is cleared afterward by default.
+**403 `access_denied` が出る場合:** 「Audience」のTest users一覧にログイン先アカウントがあるか、ブラウザで別のGoogleアカウントを選んでいないかを確認します。さらに、取り込んだJSONの `client_id` が、テストユーザーを設定した**同じCloudプロジェクト**の「Clients」にあるIDと一致するか確認してください。JSONを取り込み直す場合は `/builder sheet` の **OAuth JSON** を再度使用します。テスト中のOAuth認可と更新トークンは7日で期限切れになるため、その場合は **Sign in** をやり直します。[Googleの公開ステータスと制限](https://support.google.com/cloud/answer/15549945)
 
-Codex is instructed to prefer FAWE for building because it usually needs fewer tool calls, commands, tokens, and less time. `fawe_region_edit` is the default for cuboids and `fawe_workflow` for shapes, masks, patterns, terrain, and coordinated edits. `sequence_set_blocks` is reserved for explicitly requested timed placement or small sparse irregular coordinate lists that FAWE cannot reasonably express.
+`/builder sheet gui` でも同じ設定画面を開けます。登録済みの行をクリックすると編集でき、`Remove` で削除できます。
 
-Larger builds use a planning-first flow. Before the first write, Codex gathers the minimum necessary world context and internally settles the footprint, orientation, proportions, palette, components, FAWE operations, execution order, and verification milestones. It then builds coarse-to-fine and checks the world at meaningful stages. A single localized correction or simple isolated edit skips this planning overhead and executes directly. The internal plan is not narrated unless requested, keeping token use down.
+コマンドだけで設定する場合も、次の操作を使えます。
 
-When selecting blocks, Codex is reminded that stairs, slabs, fences, walls, panes, trapdoors, and other non-full blocks are available alongside full blocks. This is deliberately only an optional design possibility: it does not prescribe the structure, decoration style, palette, or where those blocks must be used.
+```text
+/builder sheet add commands https://docs.google.com/spreadsheets/d/シートID1/edit
+/builder sheet add items https://docs.google.com/spreadsheets/d/シートID2/edit
+/builder sheet connect
+/builder sheet list
+/builder sheet status
+```
 
-Commands are sent as the logged-in player on Minecraft's client thread. BuilderMod validates every field and rejects generated commands over Minecraft 1.8.9's 100-character chat-packet limit instead of allowing silent truncation. A successful tool result confirms transmission only; use the observation tools afterward to verify that the server accepted and applied the change.
+登録を消すには `/builder sheet remove <名前>` を使います。以前の `/builder sheet set <URL>` も使え、`default` という名前で登録します。登録は `.minecraft/config/buildermod.cfg` の `google_sheets` カテゴリに保存され、以前の単一URL設定も読み込み時に引き継ぎます。再起動後も使う更新トークンは `.minecraft/config/buildermod-google-token.json` に保存されるため、両ファイルを共有しないでください。接続を解除したい場合はMinecraftを終了し、そのトークンファイルを削除します。Google側のアクセス許可もアカウント設定から取り消せます。
 
-The target server uses Minecraft 1.8.9 legacy block IDs. Codex is instructed to use numeric IDs by default: `1` for stone, `35:14` for red wool in FAWE patterns, and weighted patterns such as `70%1,30%4`. Modern or namespaced block names are avoided unless the player explicitly confirms that the server accepts them.
+AIは `list_config_sheets` で登録名を確認し、`list_tabs` でタブ名と行数・列数を確認できます。`read_config_sheet` は従来どおり `range` に `Settings!A1:D50` のようなA1表記を指定して一括取得します。1ファイルだけ登録されている場合、`sheet` は省略できます。`range` の省略時は先頭タブの `A1:Z200` を読みます。
+
+大きいタブには `read_config_rows` を使います。`tab` に `list_tabs` の正確な名前を指定し、必要なら `columns: "C"` や `columns: "A:D"`、`max_chars: 500`、`headers: true` を指定します。`headers: true` では1行目をキーにした `records` を返します。`next_row` があれば次回の `start_row` に渡して続きから取得します。Google APIの1回の応答が256 KiBを超えると、取得行数を自動で減らします。1行だけで超える場合は列を絞ってください。
+
+`search_sheet` はキーワードまたは `regex: true` の正規表現でセルを探し、タブ名・セル位置・短いプレビューを返します。`next_tab`、`next_row`、`next_column` が返ったら、それぞれ `start_tab`、`start_row`、`start_column` に渡して続きを検索できます。`get_function` は `groupid` と `funcname` の完全一致で `function` タブから1行を探し、ヘッダー名を付けて返します。タブ名が異なる場合は `tab` を指定します。いずれも読み取り専用です。Google Sheets APIのアクセス権エラー時は、URL、同意したGoogleアカウント、Sheets APIの有効化を確認してください。
+
+## Minecraftの状態を調べるMCPツール
+
+現在読み込まれているワールドに対して、次の読み取り専用ツールを使えます。
+
+- `get_player_context`: プレイヤーの位置・視線・ディメンション・ゲームモード・時刻・天候・見ているブロック
+- `get_height_map`: 周囲の地形の高さ。必要に応じて上面ブロックや間引き間隔も指定可能（半径32まで）
+- `capture_view`: プレイヤーを動かさず、仮想カメラからPNG画像を撮影（初期値320×180、最大512×512）
+- `get_blocks`: 直方体内のブロックをパレットと連長圧縮で取得（最大32,768ブロック）
+- `inspect_position`: 1座標のブロック・材質・明るさ・空・バイオーム・タイルエンティティ
+- `summarize_blocks`: 大きな直方体内のブロック種類別の個数（最大262,144ブロック）
+
+ワールドと描画処理はMinecraftのクライアントスレッドで実行します。ワールドが開いていない場合や必要なチャンクが未読み込みの場合は、エラーを返します。これらのツールはブロック配置やサーバーへのコマンド送信を行いません。
+
+## Minecraftの建築用MCPツール
+
+次の書き込みツールも利用できます。Codexの許可設定が適用されるよう、MCP上では変更を伴うツールとして登録されています。
+
+- `set_block`: Minecraft 1.8.9の `/setblock`。ブロックデータと置換・破壊・保持モードに対応
+- `teleport_player`: 現在のプレイヤー、または名前を指定したプレイヤーを絶対座標へ `/tp` で移動。サーバー権限が必要
+- `place_command_block`: インパルス型コマンドブロック（ID 137）を内容付きで配置。短文は `/blockdata`、長文は通常のコマンドブロック編集パケットを使用し、サーバーの応答と配置結果を報告。長文にはクリエイティブモード、コマンドブロックの有効化、サーバー権限が必要で、上限はUTF-8で30,000バイト
+- `fill_blocks`: `/fill`。通常の32,768ブロック上限、各塗りつぶしモード、置換対象の指定に対応
+- `sequence_set_blocks`: 座標を順に指定するTheLowの `/sequence_setblock <seconds> blockId[:data] x y z & ...`
+- `fawe_region_edit`: `//pos1`、`//pos2` で選択し、`//set`、`//replace`、`//walls`、`//faces`、`//overlay` を実行（最大200万ブロック）
+- `fawe_workflow`: 選択、マスク・変形、地形編集、図形生成、クリップボード操作、移動、バイオーム編集、取り消しなどを最大6手順で実行。通常は最後に全体設定を解除
+
+Codexには、建築時はコマンド数と所要時間を抑えやすいFAWEを優先するよう指示しています。直方体は `fawe_region_edit`、図形・マスク・模様・地形などは `fawe_workflow` を使います。`sequence_set_blocks` は時間指定の配置や、FAWEで表しにくい少数の不規則な座標に限ります。
+
+大きな建築では、最初の書き込み前に必要なワールド情報を集め、範囲・向き・比率・素材・構成・作業順・確認点を内部で決めます。その後、大枠から細部へ進め、節目で結果を確認します。局所的な修正は直接実行します。内部計画は求められない限り会話に表示しません。
+
+素材を選ぶ際は、通常のブロックに加えて階段・ハーフブロック・フェンス・壁・板ガラス・トラップドアなども候補にできます。どこに使うかは建築内容に応じて判断します。
+
+コマンドはログイン中のプレイヤーとして送信します。BuilderModは各項目を検証し、Minecraft 1.8.9のチャットパケット上限100文字を超えるコマンドは、黙って切り詰めずエラーにします。ツールの成功は送信を示すため、サーバー上の反映結果は観察ツールで確認します。
+
+対象サーバーはMinecraft 1.8.9の旧式ブロックIDを使います。Codexには数値IDを既定として指示しています。例: 石は `1`、赤い羊毛はFAWEの模様で `35:14`、重み付きの模様は `70%1,30%4`。新しい名前付きIDは、サーバーで使えることをプレイヤーが明示した場合に使います。
 
 ModがCodexのユーザー設定 `~/.codex/config.toml` にBuilderModを登録します。既存の設定は保持し、変更前のファイルを `config.toml.buildermod.bak` にバックアップします。その後、ブラウザーでローカルセットアップ画面を開きます。
 
@@ -201,24 +243,24 @@ Codexはウィンドウを閉じてもバックグラウンドで動き続けま
 http://127.0.0.1:25585/mcp
 ```
 
-## Singleplayer bulk building
+## シングルプレイでの一括建築
 
-`local_fill_blocks` directly edits the integrated server world in singleplayer, without FAWE or chat commands. It supports replace, keep, outline, and hollow modes for cuboids up to 65,536 blocks per call. The target chunks must already be loaded. Changes are saved and sent to clients, and cannot be undone through this tool. It is a write tool subject to the usual approval setting; it rejects multiplayer worlds. `get_player_context` reports `singleplayer` so an agent can choose the appropriate tool.
+`local_fill_blocks` は、FAWEやチャットコマンドを使わずにシングルプレイのワールドを直接編集します。1回につき最大65,536ブロックの直方体に対し、置換・保持・輪郭・中空の各モードを使えます。対象チャンクは読み込み済みである必要があります。変更は保存されてクライアントに送られますが、このツールでは取り消せません。通常の書き込み許可設定が適用され、マルチプレイでは使用できません。AIは `get_player_context` の `singleplayer` を見て利用可能か判断できます。
 
-## Singleplayer schematic paste
+## シングルプレイでのschematic貼り付け
 
-For custom structures, Codex can create a classic gzip-compressed Alpha `.schematic` under `.minecraft/schematics/` and call `local_paste_schematic` with a path relative to that directory and destination `x`, `y`, `z`. The destination is the minimum corner; WorldEdit origin/offset tags are ignored. The classic arrays use `(y * Length + z) * Width + x` order and legacy numeric block IDs and metadata. Up to 65,536 blocks are supported; target chunks must be loaded. Air is skipped unless `include_air` is true. Entities, tile entities, and blocks requiring tile entities are rejected. There is no undo. This is an approval-controlled write and only works in local singleplayer.
+独自の建築物では、Codexが従来形式のgzip圧縮されたAlpha `.schematic` ファイルを `.minecraft/schematics/` 内に作成し、`local_paste_schematic` でそのフォルダーからの相対パスと貼り付け先の `x`、`y`、`z` を指定できます。貼り付け先は構造物の最小座標で、WorldEditの原点・オフセット情報は無視します。配列は `(y * Length + z) * Width + x` の順序で、旧式の数値ブロックIDとメタデータを使います。最大65,536ブロックに対応し、対象チャンクは読み込み済みである必要があります。空気は `include_air` が `true` の場合のみ貼り付けます。エンティティ、タイルエンティティ、およびタイルエンティティが必要なブロックは扱えません。取り消し機能はありません。書き込み許可が必要で、ローカルのシングルプレイでのみ動作します。
 
-## Visual building workflow
+## 画像を基準にした建築の流れ
 
-For substantial builds, Codex uses an attached reference or, when an image-generation tool is available in its environment, generates a Minecraft-style 3D concept before building. It translates that visual target into blocks, then uses `capture_view` at meaningful milestones to compare and correct the build. If image generation is unavailable it reports the limitation and proceeds with an internal design. Simple edits skip the concept step.
+大きな建築では、Codexがプレイヤーの参考画像を使うか、利用環境に画像生成ツールがあればMinecraft風の3D完成イメージを作ります。それをブロックで再現し、節目ごとに `capture_view` の画像と比較して修正します。画像生成が使えない場合はその旨を伝え、内部で設計して進めます。簡単な修正では画像の工程を省きます。
 
-The Minecraft-launched Codex CLI runs with the `workspace-write` sandbox so it can create and validate schematics under `.minecraft/schematics`. The prompt limits file changes and shell commands to that purpose; the sandbox itself permits writes across its configured workspace, so this scope is an instruction rather than a filesystem-enforced restriction. The existing Writes switch controls BuilderMod MCP writes, not shell or file operations. Image generation depends on tools available to the installed Codex environment.
+Minecraftから起動するCodex CLIは、`.minecraft/schematics` 内でschematicを作成・検証できるよう `workspace-write` サンドボックスで動作します。指示文ではファイル変更とシェルコマンドをその用途に限りますが、サンドボックス自体は設定された作業領域への書き込みを許すため、ファイルシステムで強制される制限ではありません。画面の `Writes` 切り替えはBuilderModのMCP書き込みツールに適用され、シェルやファイル操作には適用されません。画像生成の可否はインストール済みCodex環境のツールに依存します。
 
-## In-game concept images
+## ゲーム内での完成イメージ表示
 
-When Codex generates a concept image, it saves a PNG or JPEG under `.minecraft/schematics/concepts/` and finishes its reply with `BUILDERMOD_CONCEPT_IMAGE: relative/path.png`. BuilderMod validates that the referenced file stays in that directory and is an image no larger than 20 MiB. The image appears directly after Codex's reply in the conversation history and scrolls with it; click it to enlarge. The image remains available until the conversation is cleared or Minecraft exits.
+Codexが完成イメージを作る場合は、PNGまたはJPEGを `.minecraft/schematics/concepts/` に保存し、回答の最後に `BUILDERMOD_CONCEPT_IMAGE: relative/path.png` という行を付けます。BuilderModは参照先がそのフォルダー内の20 MiB以下の画像であることを検証します。画像は会話履歴の回答直後に表示され、会話と一緒にスクロールできます。クリックすると拡大します。会話を消すかMinecraftを終了するまで表示できます。
 
-## Model and reasoning controls
+## モデルと思考量の切り替え
 
-The BuilderMod conversation screen has `Model` and `Think` buttons. Each click cycles the model between Default, `gpt-6-astra`, `gpt-6.1-sol`, `gpt-6-sol`, `gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`; reasoning cycles Default, low, medium, high, xhigh, max, and ultra. The values persist in `buildermod.cfg` and are passed to the next Codex CLI request. Choose Default to retain the Codex CLI's own configured model or reasoning effort.
+会話画面の `Model` と `Think` ボタンで設定を切り替えます。モデルは `Default`、`gpt-6-astra`、`gpt-6.1-sol`、`gpt-6-sol`、`gpt-6-luna`、`gpt-5.6-sol`、`gpt-5.6-terra`、`gpt-5.6-luna` の順に切り替わります。思考量は `Default`、`low`、`medium`、`high`、`xhigh`、`max`、`ultra` です。値は `buildermod.cfg` に保存され、次のCodex CLIへの依頼から適用されます。`Default` を選ぶとCodex CLI側の既定値を使います。

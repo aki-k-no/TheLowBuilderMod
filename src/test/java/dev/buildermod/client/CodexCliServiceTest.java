@@ -44,6 +44,7 @@ public final class CodexCliServiceTest {
         Assert.assertTrue(command.contains("mcp_servers.buildermod.default_tools_approval_mode=\"approve\""));
         Assert.assertTrue(command.contains("mcp_servers.buildermod.tools.fawe_region_edit.approval_mode=\"approve\""));
         Assert.assertTrue(command.contains("mcp_servers.buildermod.tools.fawe_workflow.approval_mode=\"approve\""));
+        Assert.assertTrue(command.contains("mcp_servers.buildermod.tools.place_command_block.approval_mode=\"approve\""));
     }
 
     @Test

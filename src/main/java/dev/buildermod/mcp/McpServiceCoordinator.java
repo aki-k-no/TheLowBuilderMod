@@ -2,6 +2,7 @@ package dev.buildermod.mcp;
 
 import dev.buildermod.client.ClientTaskQueue;
 import dev.buildermod.client.MinecraftToolExecutor;
+import dev.buildermod.client.GoogleSheetService;
 import dev.buildermod.client.ServerChatFeedback;
 import dev.buildermod.config.BuilderConfig;
 import java.io.IOException;
@@ -20,6 +21,7 @@ public final class McpServiceCoordinator {
     private final BuilderConfig config;
     private final ClientTaskQueue taskQueue;
     private final ServerChatFeedback serverChatFeedback;
+    private final GoogleSheetService googleSheets;
     private PairingTokenStore tokenStore;
     private EmbeddedMcpServer server;
     private Thread shutdownHook;
@@ -29,7 +31,10 @@ public final class McpServiceCoordinator {
         this.config = config;
         this.taskQueue = taskQueue;
         this.serverChatFeedback = serverChatFeedback;
+        this.googleSheets = new GoogleSheetService(config);
     }
+
+    public GoogleSheetService getGoogleSheets() { return googleSheets; }
 
     public synchronized void start() {
         if (!config.isEnabled()) {
@@ -40,7 +45,7 @@ public final class McpServiceCoordinator {
 
         try {
             tokenStore = new PairingTokenStore(config.getPairingTokenFile());
-            server = new EmbeddedMcpServer(config.getPort(), tokenStore, new MinecraftToolExecutor(taskQueue, serverChatFeedback));
+            server = new EmbeddedMcpServer(config.getPort(), tokenStore, new MinecraftToolExecutor(taskQueue, serverChatFeedback, googleSheets));
             server.start();
             state = State.RUNNING;
             shutdownHook = new Thread(new Runnable() {

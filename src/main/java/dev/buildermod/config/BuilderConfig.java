@@ -1,6 +1,9 @@
 package dev.buildermod.config;
 
 import java.io.File;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import net.minecraftforge.common.config.Configuration;
 
 public final class BuilderConfig {
@@ -9,6 +12,7 @@ public final class BuilderConfig {
     private static final String CATEGORY_MCP = "mcp";
     private static final String CATEGORY_CODEX = "codex";
     private static final String CATEGORY_AI = "ai";
+    private static final String CATEGORY_SHEETS = "google_sheets";
 
     private final File configFile;
     private final boolean enabled;
@@ -19,8 +23,10 @@ public final class BuilderConfig {
     private volatile String codexReasoningEffort;
     private volatile String provider;
     private volatile String claudeModel;
+    private volatile String googleSheetUrl;
+    private volatile Map<String, String> googleSheets;
 
-    private BuilderConfig(File configFile, boolean enabled, int port, File pairingTokenFile, boolean autoApproveWrites, String codexModel, String codexReasoningEffort, String provider, String claudeModel) {
+    private BuilderConfig(File configFile, boolean enabled, int port, File pairingTokenFile, boolean autoApproveWrites, String codexModel, String codexReasoningEffort, String provider, String claudeModel, String googleSheetUrl, Map<String, String> googleSheets) {
         this.configFile = configFile;
         this.enabled = enabled;
         this.port = port;
@@ -30,6 +36,8 @@ public final class BuilderConfig {
         this.codexReasoningEffort = codexReasoningEffort;
         this.provider = provider;
         this.claudeModel = claudeModel;
+        this.googleSheetUrl = googleSheetUrl;
+        this.googleSheets = Collections.unmodifiableMap(new LinkedHashMap<String, String>(googleSheets));
     }
 
     public static BuilderConfig load(File file) {
@@ -63,8 +71,11 @@ public final class BuilderConfig {
             String provider = config.getString("provider", CATEGORY_AI, "codex", "AI CLI backend: codex or claude.");
             if (!("codex".equals(provider) || "claude".equals(provider))) { provider = "codex"; config.get(CATEGORY_AI, "provider", "codex", "AI CLI backend: codex or claude.").set("codex"); }
             String claudeModel = config.getString("claudeModel", CATEGORY_AI, "", "Optional Claude model override; empty uses Claude Code default.");
+            String googleSheetUrl = config.getString("url", CATEGORY_SHEETS, "", "Read-only Google spreadsheet URL used by BuilderMod MCP.");
+            String[] entries = config.getStringList("entries", CATEGORY_SHEETS, new String[0], "Named Google spreadsheets as alias|URL. Use /builder sheet add to edit.");
+            Map<String, String> googleSheets = parseGoogleSheets(entries, googleSheetUrl);
             File parent = file.getAbsoluteFile().getParentFile();
-            return new BuilderConfig(file, enabled, port, new File(parent, "buildermod-pairing.token"), autoApproveWrites, model, reasoning, provider, claudeModel);
+            return new BuilderConfig(file, enabled, port, new File(parent, "buildermod-pairing.token"), autoApproveWrites, model, reasoning, provider, claudeModel, googleSheetUrl, googleSheets);
         } finally {
             if (config.hasChanged()) {
                 config.save();
@@ -98,6 +109,47 @@ public final class BuilderConfig {
     public synchronized void setProvider(String value) { setAiChoice("provider", value, "AI CLI backend: codex or claude."); provider = value; }
     public synchronized String getClaudeModel() { return claudeModel; }
     public synchronized void setClaudeModel(String value) { setAiChoice("claudeModel", value, "Optional Claude model override; empty uses Claude Code default."); claudeModel = value; }
+    public synchronized String getGoogleSheetUrl() { return googleSheetUrl; }
+    public synchronized Map<String, String> getGoogleSheets() { return googleSheets; }
+    public synchronized void setGoogleSheet(String name, String url) {
+        Map<String, String> updated = new LinkedHashMap<String, String>(googleSheets);
+        updated.put(name, url);
+        saveGoogleSheets(updated);
+    }
+    public synchronized boolean removeGoogleSheet(String name) {
+        if (!googleSheets.containsKey(name)) return false;
+        Map<String, String> updated = new LinkedHashMap<String, String>(googleSheets);
+        updated.remove(name);
+        saveGoogleSheets(updated);
+        return true;
+    }
+    private void saveGoogleSheets(Map<String, String> updated) {
+        String[] entries = new String[updated.size()]; int index = 0;
+        for (Map.Entry<String, String> item : updated.entrySet()) entries[index++] = item.getKey() + "|" + item.getValue();
+        Configuration config = new Configuration(configFile);
+        try {
+            config.load();
+            config.get(CATEGORY_SHEETS, "entries", new String[0], "Named Google spreadsheets as alias|URL. Use /builder sheet add to edit.").set(entries);
+            config.get(CATEGORY_SHEETS, "url", "", "Legacy single Google spreadsheet URL; migrated to entries.").set("");
+        }
+        finally { if (config.hasChanged()) config.save(); }
+        googleSheets = Collections.unmodifiableMap(updated);
+        googleSheetUrl = "";
+    }
+    private static Map<String, String> parseGoogleSheets(String[] entries, String legacyUrl) {
+        Map<String, String> sheets = new LinkedHashMap<String, String>();
+        if (legacyUrl != null && !legacyUrl.trim().isEmpty()) sheets.put("default", legacyUrl.trim());
+        for (String entry : entries) {
+            int separator = entry.indexOf('|');
+            if (separator <= 0) continue;
+            String name = entry.substring(0, separator), url = entry.substring(separator + 1);
+            if (name.matches("[A-Za-z0-9_-]{1,32}") && !url.trim().isEmpty()) sheets.put(name, url.trim());
+        }
+        return sheets;
+    }
+    public synchronized void setGoogleSheetUrl(String value) {
+        setGoogleSheet("default", value);
+    }
     private void setCodexChoice(String key, String value, String comment) { Configuration config = new Configuration(configFile); try { config.load(); config.get(CATEGORY_CODEX, key, "", comment).set(value); } finally { if (config.hasChanged()) config.save(); } }
     private void setAiChoice(String key, String value, String comment) { Configuration config = new Configuration(configFile); try { config.load(); config.get(CATEGORY_AI, key, "", comment).set(value); } finally { if (config.hasChanged()) config.save(); } }
 

@@ -15,6 +15,7 @@ import java.util.zip.GZIPInputStream;
 import net.minecraft.nbt.CompressedStreamTools;
 import java.math.BigDecimal;
 import java.nio.IntBuffer;
+import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -28,6 +29,8 @@ import javax.imageio.ImageIO;
 import net.minecraft.block.Block;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.client.Minecraft;
+import net.minecraft.network.PacketBuffer;
+import net.minecraft.network.play.client.C17PacketCustomPayload;
 import net.minecraft.client.multiplayer.WorldClient;
 import net.minecraft.client.renderer.GlStateManager;
 import net.minecraft.client.renderer.OpenGlHelper;
@@ -44,6 +47,7 @@ import net.minecraft.world.biome.BiomeGenBase;
 import net.minecraft.world.WorldServer;
 import net.minecraft.server.integrated.IntegratedServer;
 import org.lwjgl.BufferUtils;
+import io.netty.buffer.Unpooled;
 import org.lwjgl.opengl.GL11;
 import org.lwjgl.opengl.GL12;
 
@@ -60,26 +64,47 @@ public final class MinecraftToolExecutor implements McpToolExecutor {
     private static final int MAX_CAPTURE_DIMENSION = 512;
     private static final int MAX_CAPTURE_PIXELS = 262144;
     private static final int MAX_CHAT_COMMAND_LENGTH = 100;
+    private static final int MAX_COMMAND_BLOCK_TEXT_BYTES = 30000;
     private static final long FAWE_FEEDBACK_TIMEOUT_MILLIS = 1500L;
+    private static final long COMMAND_BLOCK_FEEDBACK_TIMEOUT_MILLIS = 2500L;
 
     private final ClientTaskQueue taskQueue;
     private final ServerChatFeedback serverChatFeedback;
+    private final GoogleSheetService googleSheets;
 
     public MinecraftToolExecutor(ClientTaskQueue taskQueue) {
         this(taskQueue, new ServerChatFeedback());
     }
 
     public MinecraftToolExecutor(ClientTaskQueue taskQueue, ServerChatFeedback serverChatFeedback) {
+        this(taskQueue, serverChatFeedback, null);
+    }
+
+    public MinecraftToolExecutor(ClientTaskQueue taskQueue, ServerChatFeedback serverChatFeedback, GoogleSheetService googleSheets) {
         this.taskQueue = taskQueue;
         this.serverChatFeedback = serverChatFeedback;
+        this.googleSheets = googleSheets;
     }
 
     @Override
     public JsonObject call(final String name, final JsonObject arguments) throws Exception {
         if ("get_thelow_wiki_page".equals(name)) return TheLowWikiReader.read(arguments);
+        if ("list_config_sheets".equals(name)) {
+            if (googleSheets == null) throw new ToolFailure("Google Sheets is not configured");
+            return googleSheets.list();
+        }
+        if ("read_config_sheet".equals(name)) {
+            if (googleSheets == null) throw new ToolFailure("Google Sheets is not configured");
+            return googleSheets.read(arguments);
+        }
+        if ("list_tabs".equals(name)) return googleSheets.listTabs(arguments);
+        if ("read_config_rows".equals(name)) return googleSheets.readRows(arguments);
+        if ("search_sheet".equals(name)) return googleSheets.search(arguments);
+        if ("get_function".equals(name)) return googleSheets.getFunction(arguments);
         if ("local_paste_schematic".equals(name)) return localPasteSchematic(arguments);
         if ("local_fill_blocks".equals(name)) return localFillBlocks(arguments);
         if ("fawe_region_edit".equals(name) || "fawe_workflow".equals(name)) return callFaweWithFeedback(name, arguments);
+        if ("place_command_block".equals(name)) return callPlaceCommandBlockWithFeedback(arguments);
         return onClientThread(new Callable<JsonObject>() {
             @Override
             public JsonObject call() throws Exception {
@@ -91,8 +116,8 @@ public final class MinecraftToolExecutor implements McpToolExecutor {
                 if ("get_command_blocks".equals(name)) return getCommandBlocks(arguments);
                 if ("summarize_blocks".equals(name)) return summarizeBlocks(arguments);
                 if ("capture_view".equals(name)) return captureView(arguments);
+                if ("teleport_player".equals(name)) return teleportPlayer(arguments);
                 if ("set_block".equals(name)) return setBlock(arguments);
-                if ("place_command_block".equals(name)) return placeCommandBlock(arguments);
                 if ("fill_blocks".equals(name)) return fillBlocks(arguments);
                 if ("sequence_set_blocks".equals(name)) return sequenceSetBlocks(arguments);
                 throw new ToolFailure("Unknown tool: " + name);
@@ -138,6 +163,82 @@ public final class MinecraftToolExecutor implements McpToolExecutor {
                 "FAWE server response received: " + messages.get(messages.size() - 1));
         }
         return response;
+    }
+
+    private JsonObject callPlaceCommandBlockWithFeedback(final JsonObject arguments) throws Exception {
+        final ServerChatFeedback.Capture capture = serverChatFeedback.begin();
+        JsonObject response;
+        try {
+            response = onClientThread(new Callable<JsonObject>() {
+                @Override public JsonObject call() throws Exception { return placeCommandBlock(arguments); }
+            });
+        } catch (Exception exception) {
+            serverChatFeedback.finish(capture, 0L);
+            throw exception;
+        }
+        List<String> messages = serverChatFeedback.finish(capture, COMMAND_BLOCK_FEEDBACK_TIMEOUT_MILLIS);
+        final int x = requiredInt(arguments, "x"), y = requiredInt(arguments, "y"), z = requiredInt(arguments, "z");
+        final String requestedCommand = normalizedCommand(requiredString(arguments, "command"));
+        JsonObject observation = onClientThread(new Callable<JsonObject>() {
+            @Override public JsonObject call() throws Exception {
+                Minecraft mc = requireWorld();
+                BlockPos pos = new BlockPos(x, y, z);
+                JsonObject observed = new JsonObject();
+                boolean loaded = mc.theWorld.isBlockLoaded(pos);
+                observed.addProperty("position_loaded", loaded);
+                if (!loaded) return observed;
+                boolean placed = mc.theWorld.getBlockState(pos).getBlock() == net.minecraft.init.Blocks.command_block;
+                observed.addProperty("block_observed", placed);
+                if (placed) {
+                    TileEntity tile = mc.theWorld.getTileEntity(pos);
+                    if (tile instanceof TileEntityCommandBlock) {
+                        String actual = ((TileEntityCommandBlock) tile).getCommandBlockLogic().getCommand();
+                        observed.addProperty("command_observed", requestedCommand.equals(actual));
+                    }
+                }
+                return observed;
+            }
+        });
+        return commandBlockResult(response, messages, observation);
+    }
+
+    static JsonObject commandBlockResult(JsonObject response, List<String> messages, JsonObject observation) {
+        JsonObject data = response.getAsJsonObject("structuredContent");
+        JsonArray feedback = new JsonArray();
+        List<String> summaries = new ArrayList<String>();
+        boolean serverError = false;
+        for (String message : messages) {
+            String summary = message.length() > 500 ? message.substring(0, 500) + "..." : message;
+            feedback.add(new com.google.gson.JsonPrimitive(summary));
+            summaries.add(summary);
+            if (looksLikeCommandFailure(message)) serverError = true;
+        }
+        data.add("server_messages", feedback);
+        data.addProperty("server_reported_error", serverError);
+        for (Map.Entry<String, JsonElement> entry : observation.entrySet()) data.add(entry.getKey(), entry.getValue());
+        boolean blockKnown = observation.has("block_observed");
+        boolean blockPlaced = blockKnown && observation.get("block_observed").getAsBoolean();
+        boolean commandKnown = observation.has("command_observed");
+        boolean commandMatched = commandKnown && observation.get("command_observed").getAsBoolean();
+        boolean confirmed = !serverError && blockPlaced && commandMatched;
+        boolean failed = !confirmed;
+        data.addProperty("server_confirmed", confirmed);
+        if (failed) response.addProperty("isError", true);
+        String text = serverError ? "Server reported a command error. " : "";
+        if (blockKnown && !blockPlaced) text += "Command block was not observed at the requested position. ";
+        else if (blockPlaced && commandKnown && !commandMatched) text += "Command block was placed, but its command text does not match. ";
+        else if (blockPlaced && commandMatched) text += "Command block and command text were observed. ";
+        else text += "Command sent; placement could not be confirmed. ";
+        if (!summaries.isEmpty()) text += "Server messages: " + String.join(" | ", summaries);
+        response.getAsJsonArray("content").get(0).getAsJsonObject().addProperty("text", text.trim());
+        return response;
+    }
+
+    static boolean looksLikeCommandFailure(String message) {
+        String text = message.toLowerCase(java.util.Locale.ROOT);
+        return looksLikeFaweFailure(message) || text.contains("permission") || text.contains("not allowed")
+            || text.contains("not enabled") || text.contains("usage:") || text.contains("could not")
+            || message.contains("\u6a29\u9650") || message.contains("\u8a31\u53ef\u3055\u308c") || message.contains("\u5931\u6557");
     }
 
     static boolean looksLikeFaweFailure(String message) {
@@ -483,6 +584,40 @@ public final class MinecraftToolExecutor implements McpToolExecutor {
         return sendBuildCommand(mc, buildSetBlockCommand(x, y, z, block, data, mode), 1, "set_block");
     }
 
+    private JsonObject teleportPlayer(JsonObject arguments) throws ToolFailure {
+        Minecraft mc = requireWorld();
+        String player = optionalString(arguments, "player", mc.thePlayer.getName());
+        if (!player.matches("[A-Za-z0-9_]{1,16}")) {
+            throw new ToolFailure("player must be an exact Minecraft username (1-16 letters, digits, or underscores)");
+        }
+        double x = requiredDouble(arguments, "x");
+        double y = requiredDouble(arguments, "y");
+        double z = requiredDouble(arguments, "z");
+        if (!Double.isFinite(x) || !Double.isFinite(z) || Math.abs(x) > 29999984D || Math.abs(z) > 29999984D
+            || !Double.isFinite(y) || y < 0D || y > 255D) {
+            throw new ToolFailure("teleport coordinates must be finite, Y must be 0-255, and X/Z must be within the world border");
+        }
+        String command = buildTeleportCommand(player, x, y, z);
+        validateCommandLength(command);
+        mc.thePlayer.sendChatMessage(command);
+        JsonObject data = new JsonObject();
+        data.addProperty("sent", true);
+        data.addProperty("player", player);
+        data.addProperty("x", x);
+        data.addProperty("y", y);
+        data.addProperty("z", z);
+        data.addProperty("server_confirmed", false);
+        return result(data, "Teleport command sent. Server permission and completion are not confirmed by the client.");
+    }
+
+    static String buildTeleportCommand(String player, double x, double y, double z) {
+        return "/tp " + player + " " + coordinate(x) + " " + coordinate(y) + " " + coordinate(z);
+    }
+
+    private static String coordinate(double value) {
+        return BigDecimal.valueOf(value).stripTrailingZeros().toPlainString();
+    }
+
     private JsonObject placeCommandBlock(JsonObject arguments) throws ToolFailure {
         Minecraft mc = requireWorld();
         int x = requiredInt(arguments, "x");
@@ -490,15 +625,46 @@ public final class MinecraftToolExecutor implements McpToolExecutor {
         int z = requiredInt(arguments, "z");
         checkY(y);
         String command = requiredString(arguments, "command");
-        if (command.length() > 256 || command.indexOf('\r') >= 0 || command.indexOf('\n') >= 0) {
-            throw new ToolFailure("command must be at most 256 characters and must not contain line breaks");
+        if (command.getBytes(StandardCharsets.UTF_8).length > MAX_COMMAND_BLOCK_TEXT_BYTES
+            || command.indexOf('\r') >= 0 || command.indexOf('\n') >= 0) {
+            throw new ToolFailure("command must be at most 30000 UTF-8 bytes and must not contain line breaks");
         }
-        if (command.startsWith("/")) command = command.substring(1);
+        command = normalizedCommand(command);
         boolean trackOutput = optionalBoolean(arguments, "track_output", true);
-        List<String> commands = new ArrayList<String>();
-        commands.add(buildSetBlockCommand(x, y, z, "137", 0, "replace"));
-        commands.add(buildCommandBlockDataCommand(x, y, z, command, trackOutput));
-        return sendBuildCommands(mc, commands, 1, "place_command_block");
+        String setBlock = buildSetBlockCommand(x, y, z, "137", 0, "replace");
+        String blockData = buildCommandBlockDataCommand(x, y, z, command, trackOutput);
+        if (blockData.length() <= MAX_CHAT_COMMAND_LENGTH) {
+            List<String> commands = new ArrayList<String>();
+            commands.add(setBlock); commands.add(blockData);
+            return sendBuildCommands(mc, commands, 1, "place_command_block");
+        }
+        if (!mc.thePlayer.capabilities.isCreativeMode) {
+            throw new ToolFailure("Long command-block text requires Creative mode and server command permission for the vanilla command-block editor packet; no commands were sent");
+        }
+        validateCommandLength(setBlock);
+        PacketBuffer payload = buildCommandBlockPayload(x, y, z, command, trackOutput);
+        mc.thePlayer.sendChatMessage(setBlock);
+        mc.getNetHandler().addToSendQueue(new C17PacketCustomPayload("MC|AdvCdm", payload));
+        JsonObject data = new JsonObject();
+        data.addProperty("sent", true); data.addProperty("tool", "place_command_block");
+        data.addProperty("setblock_command", setBlock);
+        data.addProperty("command_transport", "MC|AdvCdm");
+        data.addProperty("command_bytes", command.getBytes(StandardCharsets.UTF_8).length);
+        data.addProperty("server_confirmed", false);
+        return result(data, "Setblock chat command and vanilla command-block editor packet sent; server acceptance is not yet confirmed.");
+    }
+
+    static PacketBuffer buildCommandBlockPayload(int x, int y, int z, String command, boolean trackOutput) {
+        PacketBuffer payload = new PacketBuffer(Unpooled.buffer());
+        payload.writeByte(0);
+        payload.writeInt(x); payload.writeInt(y); payload.writeInt(z);
+        payload.writeString(command);
+        payload.writeBoolean(trackOutput);
+        return payload;
+    }
+
+    private static String normalizedCommand(String command) {
+        return command.startsWith("/") ? command.substring(1) : command;
     }
 
     private JsonObject fillBlocks(JsonObject arguments) throws ToolFailure {

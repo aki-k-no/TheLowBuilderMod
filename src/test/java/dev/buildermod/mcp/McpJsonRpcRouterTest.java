@@ -1,5 +1,6 @@
 package dev.buildermod.mcp;
 
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import org.junit.Assert;
 import org.junit.Test;
@@ -125,6 +126,9 @@ public final class McpJsonRpcRouterTest {
         boolean sequenceFound = false;
         boolean faweFound = false;
         boolean workflowFound = false;
+        boolean teleportFound = false;
+        boolean sheetFound = false;
+        boolean sheetListFound = false;
         for (com.google.gson.JsonElement element : response.getBody().getAsJsonObject("result").getAsJsonArray("tools")) {
             JsonObject tool = element.getAsJsonObject();
             if ("sequence_set_blocks".equals(tool.get("name").getAsString())) {
@@ -150,10 +154,42 @@ public final class McpJsonRpcRouterTest {
                 Assert.assertTrue(stepProperties.has("biome"));
                 Assert.assertTrue(tool.getAsJsonObject("annotations").get("destructiveHint").getAsBoolean());
             }
+            if ("teleport_player".equals(tool.get("name").getAsString())) {
+                teleportFound = true;
+                Assert.assertTrue(tool.getAsJsonObject("annotations").get("destructiveHint").getAsBoolean());
+                Assert.assertFalse(tool.getAsJsonObject("annotations").get("readOnlyHint").getAsBoolean());
+                Assert.assertTrue(tool.getAsJsonObject("inputSchema").getAsJsonObject("properties").has("player"));
+            }
+            if ("read_config_sheet".equals(tool.get("name").getAsString())) {
+                sheetFound = true;
+                Assert.assertTrue(tool.getAsJsonObject("annotations").get("readOnlyHint").getAsBoolean());
+                Assert.assertTrue(tool.getAsJsonObject("inputSchema").getAsJsonObject("properties").has("range"));
+                Assert.assertTrue(tool.getAsJsonObject("inputSchema").getAsJsonObject("properties").has("sheet"));
+            }
+            if ("list_config_sheets".equals(tool.get("name").getAsString())) {
+                sheetListFound = true;
+                Assert.assertTrue(tool.getAsJsonObject("annotations").get("readOnlyHint").getAsBoolean());
+            }
+            if ("list_tabs".equals(tool.get("name").getAsString())
+                || "read_config_rows".equals(tool.get("name").getAsString())
+                || "search_sheet".equals(tool.get("name").getAsString())
+                || "get_function".equals(tool.get("name").getAsString())) {
+                Assert.assertTrue(tool.getAsJsonObject("annotations").get("readOnlyHint").getAsBoolean());
+            }
         }
         Assert.assertTrue("sequence_set_blocks tool was not listed", sequenceFound);
         Assert.assertTrue("fawe_region_edit tool was not listed", faweFound);
         Assert.assertTrue("fawe_workflow tool was not listed", workflowFound);
+        Assert.assertTrue("teleport_player tool was not listed", teleportFound);
+        Assert.assertTrue("read_config_sheet tool was not listed", sheetFound);
+        Assert.assertTrue("list_config_sheets tool was not listed", sheetListFound);
+        java.util.Set<String> names = new java.util.HashSet<String>();
+        for (JsonElement element : response.getBody().getAsJsonObject("result").getAsJsonArray("tools"))
+            names.add(element.getAsJsonObject().get("name").getAsString());
+        Assert.assertTrue(names.contains("list_tabs"));
+        Assert.assertTrue(names.contains("read_config_rows"));
+        Assert.assertTrue(names.contains("search_sheet"));
+        Assert.assertTrue(names.contains("get_function"));
     }
 
     @Test
